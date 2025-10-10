@@ -24,6 +24,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 导入 os 模块用于环境变量
+import os
+
 
 class Stage3RefineLocate:
     """
@@ -34,6 +37,35 @@ class Stage3RefineLocate:
         self.tokenizer = get_tokenizer()
         self.mapper = TokenMapper(self.tokenizer)
         self.llm_client = get_llm_client()
+        self._cached_tags = None  # 缓存系统标签
+
+    def _fetch_system_tags(self) -> List[str]:
+        """
+        从数据库直接获取系统现有标签
+
+        Returns:
+            标签列表
+        """
+        if self._cached_tags is not None:
+            return self._cached_tags
+
+        try:
+            # 直接从数据库获取标签（更可靠）
+            try:
+                from database import get_all_tags_with_stats
+            except ImportError:
+                from ..database import get_all_tags_with_stats
+
+            tags_data = get_all_tags_with_stats()
+            # 提取标签名称（去重）
+            tags = list(set(tag["name"] for tag in tags_data))
+            self._cached_tags = tags
+            logger.info(f"✅ 从数据库获取了 {len(tags)} 个系统标签: {tags[:10]}...")
+            return tags
+
+        except Exception as e:
+            logger.warning(f"⚠️ 无法从数据库获取标签: {e}")
+            return []
 
     def process(self, stage2_result: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1399,18 +1431,37 @@ class Stage3RefineLocate:
             is_atomic = True
             atomic_type = "content"
 
-        # 生成标签
+        # 生成标签 - 只使用系统中已有的标签
+        existing_tags = self._fetch_system_tags()
         content_tags = []
+
+        # 定义候选标签及其条件
+        candidate_tags = []
         if node['number']:
-            content_tags.append(f"章节{node['number']}")
+            candidate_tags.append(f"章节{node['number']}")
         if node.get('is_toc', False):
-            content_tags.append("目录")
+            candidate_tags.append("目录")
         if node['has_table']:
-            content_tags.append("表格")
+            candidate_tags.append("表格")
         if node['has_code']:
-            content_tags.append("代码")
+            candidate_tags.append("代码")
         if node['has_steps']:
-            content_tags.append("步骤")
+            candidate_tags.append("步骤")
+
+        # 只保留系统中已存在的标签
+        for tag in candidate_tags:
+            if tag in existing_tags:
+                content_tags.append(tag)
+
+        # 处理 user_tag：只使用系统中已存在的标签
+        # 【重要】不使用文档标题作为标签，必须从已有标签中选择
+        node_title = node.get('title', '')
+        if node_title and node_title in existing_tags:
+            # 如果节点标题恰好是已有标签，则使用
+            user_tag = node_title
+        else:
+            # 否则，使用默认标签或第一个已有标签
+            user_tag = "未分类" if "未分类" in existing_tags else (existing_tags[0] if existing_tags else None)
 
         return {
             "content": section_text,
@@ -1421,7 +1472,7 @@ class Stage3RefineLocate:
             "token_count": token_count,
             "is_atomic": is_atomic,
             "atomic_type": atomic_type,
-            "user_tag": node.get('title', ''),
+            "user_tag": user_tag,
             "content_tags": content_tags[:5],
             "context_tags": [f"hierarchy_level_{node['hierarchy_level']}"],
             "section_number": node.get('number'),

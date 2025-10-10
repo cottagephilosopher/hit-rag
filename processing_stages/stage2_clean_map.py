@@ -39,7 +39,7 @@ class Stage2CleanMap:
 
     def _fetch_system_tags(self) -> List[str]:
         """
-        从 API 服务器获取系统现有标签
+        从数据库直接获取系统现有标签
 
         Returns:
             标签列表
@@ -48,25 +48,21 @@ class Stage2CleanMap:
             return self._cached_tags
 
         try:
-            import requests
+            # 直接从数据库获取标签（更可靠）
+            try:
+                from database import get_all_tags_with_stats
+            except ImportError:
+                from ..database import get_all_tags_with_stats
 
-            # 从环境变量获取 API 服务器地址
-            api_host = os.getenv("API_SERVER_HOST", "http://localhost:8000")
-            response = requests.get(f"{api_host}/api/tags/all", timeout=5)
-
-            if response.status_code == 200:
-                tags_data = response.json()
-                # 提取标签名称
-                tags = [tag["name"] for tag in tags_data]
-                self._cached_tags = tags
-                logger.info(f"✅ 从 API 服务器获取了 {len(tags)} 个系统标签")
-                return tags
-            else:
-                logger.warning(f"⚠️ 获取系统标签失败，状态码: {response.status_code}")
-                return []
+            tags_data = get_all_tags_with_stats()
+            # 提取标签名称（去重）
+            tags = list(set(tag["name"] for tag in tags_data))
+            self._cached_tags = tags
+            logger.info(f"✅ 从数据库获取了 {len(tags)} 个系统标签: {tags[:10]}...")
+            return tags
 
         except Exception as e:
-            logger.warning(f"⚠️ 无法连接到 API 服务器获取标签: {e}")
+            logger.warning(f"⚠️ 无法从数据库获取标签: {e}")
             return []
 
     def process(self, stage1_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -255,6 +251,28 @@ class Stage2CleanMap:
             if not isinstance(content_tags, list):
                 content_tags = []
 
+            # 【重要】验证并过滤标签：只保留系统中已存在的标签
+            # LLM 只能从已有标签中选择，不允许创建新标签
+            if existing_tags:
+                # 验证 user_tag
+                if user_tag not in existing_tags:
+                    logger.warning(f"⚠️ LLM 返回的 user_tag '{user_tag}' 不在系统标签列表中，设为默认值")
+                    # 优先使用"未分类"（如果存在），否则使用第一个已有标签
+                    user_tag = "未分类" if "未分类" in existing_tags else existing_tags[0]
+
+                # 验证 content_tags：只保留已存在的标签
+                original_content_tags = content_tags.copy()
+                content_tags = [tag for tag in content_tags if tag in existing_tags]
+
+                if len(content_tags) < len(original_content_tags):
+                    removed_tags = set(original_content_tags) - set(content_tags)
+                    logger.warning(f"⚠️ LLM 返回的部分 content_tags 不在系统标签列表中，已过滤: {removed_tags}")
+            else:
+                # 如果系统中没有任何标签，设置为 None（不创建新标签）
+                logger.warning(f"⚠️ 系统中没有任何标签，user_tag 和 content_tags 设为空")
+                user_tag = None
+                content_tags = []
+
             return {
                 "marked_text": marked_text,
                 "user_tag": user_tag,
@@ -263,10 +281,14 @@ class Stage2CleanMap:
 
         except Exception as e:
             logger.error(f"❌ LLM 调用失败: {e}")
-            # 返回默认值
+            # 返回默认值 - 如果有已有标签则使用，否则为 None
+            default_user_tag = None
+            if existing_tags:
+                default_user_tag = "未分类" if "未分类" in existing_tags else existing_tags[0]
+
             return {
                 "marked_text": chunk_text,
-                "user_tag": "未分类",
+                "user_tag": default_user_tag,
                 "content_tags": []
             }
 
@@ -347,6 +369,12 @@ class Stage2CleanMap:
         chunk_text = mid_chunk["text"]
         tokens = self.tokenizer.encode(chunk_text)
 
+        # 获取系统标签，使用已有标签或 None
+        existing_tags = self._fetch_system_tags()
+        fallback_user_tag = None
+        if existing_tags:
+            fallback_user_tag = "未分类" if "未分类" in existing_tags else existing_tags[0]
+
         return {
             "text": chunk_text,
             "original_text": chunk_text,
@@ -355,7 +383,7 @@ class Stage2CleanMap:
             "token_end": mid_chunk["token_end"],
             "token_count": len(tokens),
             "tokens": tokens,
-            "user_tag": "未分类",
+            "user_tag": fallback_user_tag,
             "content_tags": [],
             "validation_passed": True,
             "char_count": len(chunk_text),

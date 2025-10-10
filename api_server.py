@@ -39,7 +39,9 @@ from database import (
     get_all_tags_with_stats,
     delete_tag_from_all_chunks,
     rename_tag_in_all_chunks,
-    merge_tags_in_all_chunks
+    merge_tags_in_all_chunks,
+    create_document,
+    create_chunk
 )
 
 # 导入向量化管理模块
@@ -850,6 +852,70 @@ async def merge_tags(request: TagMergeRequest):
         error_detail = f"合并标签失败: {str(e)}\n{traceback.format_exc()}"
         print(error_detail)
         raise HTTPException(status_code=500, detail=f"合并标签失败: {str(e)}")
+
+
+class TagCreateRequest(BaseModel):
+    """标签创建请求"""
+    tag_name: str
+
+
+@app.post("/api/tags/create")
+async def create_tag(request: TagCreateRequest):
+    """
+    创建新标签（通过创建一个占位chunk）
+
+    说明：由于标签系统是从chunks中提取的，创建新标签需要创建一个特殊的占位chunk。
+    这个chunk标记为已废弃（status=-1），不会被向量化，仅用于标签定义。
+    """
+    try:
+        tag_name = request.tag_name.strip()
+        if not tag_name:
+            raise HTTPException(status_code=400, detail="标签名称不能为空")
+
+        # 检查标签是否已存在
+        all_tags = get_all_tags_with_stats()
+        if any(tag['name'] == tag_name for tag in all_tags):
+            raise HTTPException(status_code=400, detail=f"标签 '{tag_name}' 已存在")
+
+        # 获取或创建系统占位文档
+        placeholder_doc = get_document_by_filename("__tag_placeholder__")
+        if not placeholder_doc:
+            # 创建占位文档
+            doc_id = create_document(
+                filename="__tag_placeholder__",
+                source_path="system",
+                status="completed"
+            )
+        else:
+            doc_id = placeholder_doc['id']
+
+        # 创建占位chunk（使用 @前缀表示人工添加）
+        chunk_id = create_chunk(
+            document_id=doc_id,
+            chunk_id=0,
+            content=f"标签占位符: {tag_name}",
+            token_start=0,
+            token_end=0,
+            token_count=0,
+            user_tag=None,
+            content_tags=[f"@{tag_name}"],  # 使用@前缀标记为人工添加
+            is_atomic=False,
+            atomic_type=None,
+            status=-1  # 标记为废弃，不会被向量化
+        )
+
+        return {
+            "tag_name": tag_name,
+            "message": f"✅ 已创建新标签 '{tag_name}'"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"创建标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"创建标签失败: {str(e)}")
 
 
 @app.post("/api/chunks/search", response_model=List[SearchResult])
