@@ -53,7 +53,7 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
-    command: ["/bin/sh", "-c", ". $CARGO_HOME/env && uv run python api_server.py"]
+    command: ["uv", "run", "python", "api_server.py"]
     networks:
       - rag-network
 
