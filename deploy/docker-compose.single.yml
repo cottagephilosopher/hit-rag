@@ -1,13 +1,11 @@
-version: '3.8'
-
 # 单容器方案 - 将前端整合到一个容器
 # 优点：简化部署、减少端口占用、统一访问入口
 # 架构：Milvus + Backend + Frontend(Nginx with 3 UIs)
 
 services:
-  # Milvus 向量数据库
+  # Milvus 向量数据库（使用国内镜像加速）
   milvus:
-    image: milvusdb/milvus:v2.3.3
+    image: docker.m.daocloud.io/milvusdb/milvus:v2.3.3
     container_name: hit-rag-milvus
     environment:
       ETCD_USE_EMBED: "true"
@@ -55,7 +53,7 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
-    command: ["uv", "run", "python", "api_server.py"]
+    command: ["/root/.cargo/bin/uv", "run", "python", "api_server.py"]
     networks:
       - rag-network
 

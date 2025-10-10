@@ -150,15 +150,14 @@ check_project_structure() {
 
 # 配置环境变量
 configure_env() {
-    log_info "配置环境变量..."
+    log_info "检查环境变量配置..."
 
     if [ -f ".env" ]; then
-        read -p "$(echo -e ${YELLOW}检测到已存在 .env 文件，是否覆盖？[y/N]: ${NC})" overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            log_info "跳过 .env 配置"
-            return
-        fi
+        log_success ".env 文件已存在，跳过配置"
+        return
     fi
+
+    log_info "开始配置环境变量..."
 
     cp env.template .env
     log_success ".env 文件已创建"
@@ -210,7 +209,7 @@ setup_document_directory() {
     local default_md_dir="${WORKSPACE_ROOT}/all-md"
 
     echo ""
-    read -p "$(echo -e ${YELLOW}文档目录 (默认: $default_md_dir): ${NC})" MD_DIR
+    read -p "$(echo -e ${YELLOW}文档目录 \(默认: $default_md_dir\): ${NC})" MD_DIR
     MD_DIR=${MD_DIR:-$default_md_dir}
 
     if [ ! -d "$MD_DIR" ]; then

@@ -2,11 +2,13 @@
 # 注意：此 Dockerfile 需要在父目录（rags/）下构建，以访问 hit-rag-ui 和 versa-chat-view
 # 构建命令：docker build -f hit-rag/Dockerfile.frontend-unified -t hit-rag-frontend .
 
-# Stage 1: 构建 Vue.js 文档管理界面
-FROM node:20-slim AS build-vue-ui
+# Stage 1: 构建 Vue.js 文档管理界面（使用国内镜像加速）
+FROM docker.m.daocloud.io/library/node:20-slim AS build-vue-ui
 
 WORKDIR /build-vue
 COPY hit-rag-ui/package*.json ./
+# 配置 npm 使用国内镜像源加速
+RUN npm config set registry https://registry.npmmirror.com
 RUN npm install
 COPY hit-rag-ui/ ./
 
@@ -15,11 +17,13 @@ RUN npm run build
 # 输出到 /build-vue/dist
 
 
-# Stage 2: 构建 Next.js 聊天界面
-FROM node:20-slim AS build-chat-view
+# Stage 2: 构建 Next.js 聊天界面（使用国内镜像加速）
+FROM docker.m.daocloud.io/library/node:20-slim AS build-chat-view
 
 WORKDIR /build-chat
 COPY versa-chat-view/package*.json ./
+# 配置 npm 使用国内镜像源加速
+RUN npm config set registry https://registry.npmmirror.com
 RUN npm install
 COPY versa-chat-view/ ./
 
@@ -33,8 +37,8 @@ RUN npm run build
 # 输出到 /build-chat/.next
 
 
-# Stage 3: 最终镜像 - Nginx + Node.js 服务器
-FROM nginx:alpine
+# Stage 3: 最终镜像 - Nginx + Node.js 服务器（使用国内镜像加速）
+FROM docker.m.daocloud.io/library/nginx:alpine
 
 # 安装 Node.js（用于运行 Next.js）
 RUN apk add --no-cache nodejs npm
