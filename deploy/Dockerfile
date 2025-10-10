@@ -14,20 +14,20 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv（Python 包管理器）
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    echo 'export PATH="/root/.cargo/bin:$PATH"' >> ~/.bashrc
+# 安装 uv（Python 包管理器）并设置环境变量
+ENV CARGO_HOME="/root/.cargo"
 ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 复制项目文件
 COPY pyproject.toml uv.lock ./
 COPY . .
 
-# 安装 Python 依赖
-RUN /root/.cargo/bin/uv sync --frozen
+# 安装 Python 依赖（在同一个 shell 中设置 PATH 并运行）
+RUN . $CARGO_HOME/env && uv sync --frozen
 
 # 暴露端口
 EXPOSE 8000
 
-# 默认命令
-CMD ["/root/.cargo/bin/uv", "run", "python", "api_server.py"]
+# 默认命令（使用 shell 形式确保环境变量生效）
+CMD ["/bin/sh", "-c", ". $CARGO_HOME/env && uv run python api_server.py"]
