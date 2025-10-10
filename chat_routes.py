@@ -1,0 +1,317 @@
+"""
+对话系统 API 路由
+提供对话消息发送、历史查询等接口
+"""
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+import logging
+
+from chat.conversation_manager import ConversationManager
+from chat.dspy_pipeline import DSPyRAGPipeline
+from vector_db.vectorization_manager import VectorizationManager
+
+logger = logging.getLogger(__name__)
+
+# 创建路由器
+router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 全局实例（懒加载）
+conversation_manager = None
+dspy_pipeline = None
+
+
+def get_conversation_manager() -> ConversationManager:
+    """获取对话管理器实例"""
+    global conversation_manager
+    if conversation_manager is None:
+        conversation_manager = ConversationManager()
+        logger.info("✅ ConversationManager initialized")
+    return conversation_manager
+
+
+def get_dspy_pipeline() -> DSPyRAGPipeline:
+    """获取 DSPy Pipeline 实例"""
+    global dspy_pipeline
+    if dspy_pipeline is None:
+        try:
+            # 获取向量存储
+            vectorization_manager = VectorizationManager()
+            vector_store = vectorization_manager.vector_store
+
+            # 初始化 DSPy Pipeline
+            dspy_pipeline = DSPyRAGPipeline(
+                vector_store=vector_store,
+                llm_model="gpt-4o-mini",
+                temperature=0.7,
+                confidence_threshold=0.5
+            )
+            logger.info("✅ DSPy Pipeline initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize DSPy Pipeline: {e}")
+            raise HTTPException(status_code=500, detail=f"DSPy初始化失败: {str(e)}")
+
+    return dspy_pipeline
+
+
+# ==================== Pydantic Models ====================
+
+class ChatMessageRequest(BaseModel):
+    """发送消息请求"""
+    session_id: Optional[str] = None  # 如果为空，创建新会话
+    message: str
+    context: Optional[Dict[str, Any]] = None  # 文档过滤、标签过滤等
+
+
+class ChatMessageResponse(BaseModel):
+    """消息响应"""
+    session_id: str
+    response: Dict[str, Any]  # 包含 type, content, sources 等
+    conversation_id: Optional[str] = None
+
+
+class ChatHistoryResponse(BaseModel):
+    """对话历史响应"""
+    session_id: str
+    messages: List[Dict[str, Any]]
+
+
+class SessionInfo(BaseModel):
+    """会话信息"""
+    session_id: str
+    created_at: str
+    last_activity: str
+    status: str
+    metadata: Dict[str, Any]
+
+
+# ==================== API Routes ====================
+
+@router.post("/message", response_model=ChatMessageResponse)
+async def send_message(request: ChatMessageRequest):
+    """
+    发送消息并获取回复
+
+    处理流程：
+    1. 创建或获取会话
+    2. 保存用户消息
+    3. 通过 DSPy Pipeline 处理查询
+    4. 保存助手回复
+    5. 返回结果
+    """
+    try:
+        manager = get_conversation_manager()
+        pipeline = get_dspy_pipeline()
+
+        # 1. 创建或获取会话
+        if request.session_id:
+            session_id = request.session_id
+            # 验证会话是否存在
+            session = manager.get_session_info(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="会话不存在")
+        else:
+            # 创建新会话
+            session_id = manager.create_session(metadata=request.context or {})
+            logger.info(f"📝 Created new session: {session_id}")
+
+        # 2. 保存用户消息
+        manager.add_message(
+            session_id=session_id,
+            role="user",
+            content=request.message
+        )
+
+        # 3. 获取对话历史
+        conversation_history = manager.format_history_for_llm(session_id, limit=5)
+
+        # 4. 通过 DSPy Pipeline 处理查询
+        logger.info(f"🤖 Processing query for session: {session_id}")
+
+        # 准备过滤条件
+        filters = None
+        if request.context:
+            # TODO: 根据 context 构建 Milvus 过滤条件
+            pass
+
+        result = pipeline.process_query(
+            user_query=request.message,
+            conversation_history=conversation_history,
+            filters=filters
+        )
+
+        # 5. 构建响应
+        if result['type'] == 'answer':
+            # 正常回答
+            response_content = {
+                "type": "answer",
+                "content": result['response'],
+                "sources": [
+                    {
+                        "chunk_id": chunk.get("chunk_id"),
+                        "document": chunk.get("document", ""),
+                        "content": chunk.get("content", "")[:200] + "...",  # 截断显示
+                        "score": chunk.get("score", 0.0)
+                    }
+                    for chunk in result.get('sources', [])[:5]
+                ],
+                "confidence": result.get('confidence', 0.0)
+            }
+
+            # 保存助手回复
+            manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=result['response'],
+                intent="question",
+                sources=result.get('sources', []),
+                metadata={
+                    "confidence": result.get('confidence'),
+                    "rewritten_query": result.get('rewrite', {}).get('rewritten_query')
+                }
+            )
+
+        elif result['type'] == 'clarification':
+            # 需要澄清
+            response_content = {
+                "type": "clarification",
+                "question": result['question'],
+                "options": result.get('options', []),
+                "sources": [
+                    {
+                        "chunk_id": chunk.get("chunk_id"),
+                        "document": chunk.get("document", ""),
+                        "content": chunk.get("content", "")[:200] + "..."
+                    }
+                    for chunk in result.get('sources', [])[:3]
+                ]
+            }
+
+            # 保存澄清消息
+            manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=result['question'],
+                intent="clarification",
+                metadata={"options": result.get('options', [])}
+            )
+
+        elif result['type'] == 'chitchat':
+            # 闲聊
+            response_content = {
+                "type": "chitchat",
+                "content": result['response']
+            }
+
+            manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=result['response'],
+                intent="chitchat"
+            )
+
+        else:
+            # 无结果
+            response_content = {
+                "type": "no_results",
+                "content": result.get('response', "抱歉，我没有找到相关信息。")
+            }
+
+            manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=response_content['content'],
+                intent="question"
+            )
+
+        return ChatMessageResponse(
+            session_id=session_id,
+            response=response_content
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"消息处理失败: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_detail)
+        raise HTTPException(status_code=500, detail=f"消息处理失败: {str(e)}")
+
+
+@router.get("/sessions/{session_id}/history", response_model=ChatHistoryResponse)
+async def get_history(session_id: str, limit: int = 20):
+    """获取对话历史"""
+    try:
+        manager = get_conversation_manager()
+
+        # 验证会话是否存在
+        session = manager.get_session_info(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+        # 获取消息历史
+        messages = manager.get_conversation_history(session_id, limit=limit)
+
+        return ChatHistoryResponse(
+            session_id=session_id,
+            messages=messages
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取历史失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取历史失败: {str(e)}")
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话"""
+    try:
+        manager = get_conversation_manager()
+        success = manager.delete_session(session_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+        return {"message": "会话已删除", "session_id": session_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除会话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除会话失败: {str(e)}")
+
+
+@router.get("/sessions", response_model=List[SessionInfo])
+async def list_sessions(limit: int = 10):
+    """获取活跃会话列表"""
+    try:
+        manager = get_conversation_manager()
+        sessions = manager.get_active_sessions(limit=limit)
+
+        return [SessionInfo(**session) for session in sessions]
+
+    except Exception as e:
+        logger.error(f"获取会话列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取会话列表失败: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/archive")
+async def archive_session(session_id: str):
+    """归档会话"""
+    try:
+        manager = get_conversation_manager()
+        success = manager.archive_session(session_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+        return {"message": "会话已归档", "session_id": session_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"归档会话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"归档会话失败: {str(e)}")

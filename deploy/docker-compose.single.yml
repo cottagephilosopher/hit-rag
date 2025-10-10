@@ -1,0 +1,81 @@
+version: '3.8'
+
+# 单容器方案 - 将前端整合到一个容器
+# 优点：简化部署、减少端口占用、统一访问入口
+# 架构：Milvus + Backend + Frontend(Nginx with 3 UIs)
+
+services:
+  # Milvus 向量数据库
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: hit-rag-milvus
+    environment:
+      ETCD_USE_EMBED: "true"
+      COMMON_STORAGETYPE: local
+    volumes:
+      - ../volumes/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # 后端 API 服务
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: hit-rag-backend
+    environment:
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+    env_file:
+      - ../.env
+    volumes:
+      - ../:/app
+      - ../all-md:/app/all-md
+      - ../volumes/output:/app/output
+      - ../volumes/db:/app/db
+    ports:
+      - "8000:8000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/assistants"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    command: ["uv", "run", "python", "api_server.py"]
+    networks:
+      - rag-network
+
+  # 统一前端服务（Nginx + 2个前端应用：Vue.js + Next.js）
+  frontend:
+    build:
+      context: ../..  # 工作区根目录，以访问 hit-rag-ui 和 versa-chat-view
+      dockerfile: hit-rag/deploy/Dockerfile.frontend-unified
+    container_name: hit-rag-frontend-unified
+    environment:
+      - BACKEND_URL=http://backend:8000
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge

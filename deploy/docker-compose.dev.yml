@@ -1,0 +1,61 @@
+version: '3.8'
+
+# 开发环境配置
+# 特点：
+# - 使用 volume 挂载实现热重载
+# - 暴露更多调试端口
+# - 详细日志输出
+
+services:
+  # Milvus 向量数据库
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: hit-rag-milvus-dev
+    environment:
+      ETCD_USE_EMBED: "true"
+      COMMON_STORAGETYPE: local
+      LOG_LEVEL: debug
+    volumes:
+      - ../volumes/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  # 后端 API 服务（开发模式）
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: hit-rag-backend-dev
+    environment:
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ../.env
+    volumes:
+      # 挂载源码实现热重载
+      - ../:/app
+      - ../all-md:/app/all-md
+      - ../volumes/output:/app/output
+      - ../volumes/db:/app/db
+    ports:
+      - "8000:8000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+    # 开发模式使用 --reload
+    command: ["uv", "run", "uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+networks:
+  default:
+    name: hit-rag-dev-network

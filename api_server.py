@@ -45,7 +45,13 @@ from database import (
 # 导入向量化管理模块
 from vector_db.vectorization_manager import VectorizationManager
 
+# 导入对话路由
+from chat_routes import router as chat_router
+
 app = FastAPI(title="RAG Preprocessor API")
+
+# 注册对话路由
+app.include_router(chat_router)
 
 # 配置CORS
 app.add_middleware(
@@ -894,6 +900,184 @@ async def search_chunks(request: SearchRequest):
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
 
+# ============================================
+# versa-chat-view 兼容性 API
+# ============================================
+
+@app.get("/api/assistants")
+async def get_assistants():
+    """获取助手列表（versa-chat-view 兼容）"""
+    return [
+        {
+            "id": "rag-assistant",
+            "name": "RAG 文档助手",
+            "description": "基于文档的智能问答助手",
+            "model": "dspy-rag",
+            "capabilities": ["document_qa", "semantic_search", "clarification"],
+            "status": "active"
+        }
+    ]
+
+
+@app.get("/api/agent/tools")
+async def get_agent_tools():
+    """获取可用工具列表（versa-chat-view 兼容）"""
+    return {
+        "tools": [
+            {
+                "name": "document_search",
+                "description": "搜索文档内容",
+                "status": "active",
+                "type": "retrieval"
+            },
+            {
+                "name": "semantic_search",
+                "description": "语义相似度搜索",
+                "status": "active",
+                "type": "retrieval"
+            },
+            {
+                "name": "tag_filter",
+                "description": "标签过滤",
+                "status": "active",
+                "type": "filter"
+            }
+        ]
+    }
+
+
+class AgentReactRequest(BaseModel):
+    """Agent React 请求"""
+    messages: List[Dict[str, Any]]  # content 可能是 string 或 array
+    stream: bool = True
+
+
+@app.post("/api/agent/react")
+async def agent_react(request: AgentReactRequest):
+    """Agent React 接口（SSE 流式响应）- 真正调用 DSPy RAG"""
+    from starlette.responses import StreamingResponse
+    from chat_routes import get_dspy_pipeline, get_conversation_manager
+    import asyncio
+
+    def extract_text_content(content) -> str:
+        """提取消息内容文本（支持字符串或数组格式）"""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # 从数组中提取所有文本内容
+            texts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get('type') == 'text' and 'text' in item:
+                        texts.append(item['text'])
+                    elif 'text' in item:
+                        texts.append(str(item['text']))
+            return ' '.join(texts)
+        return str(content)
+
+    async def event_stream():
+        """生成 SSE 事件流"""
+        try:
+            # 提取最后一条用户消息
+            user_messages = [msg for msg in request.messages if msg.get('role') == 'user']
+            if not user_messages:
+                yield f'data: {json.dumps({"type": "error", "content": "No user message found"})}\n\n'
+                return
+
+            last_message = user_messages[-1]
+            query = extract_text_content(last_message.get('content', ''))
+
+            # 1. 发送思考过程 - 开始分析
+            yield f'data: {json.dumps({"type": "reasoning", "content": "🤔 开始分析问题..."})}\n\n'
+            await asyncio.sleep(0.05)
+
+            # 2. 获取 DSPy Pipeline 和对话管理器
+            try:
+                pipeline = get_dspy_pipeline()
+                conv_manager = get_conversation_manager()
+            except Exception as e:
+                yield f'data: {json.dumps({"type": "error", "content": f"初始化失败: {str(e)}"})}\n\n'
+                return
+
+            # 3. 构建对话历史（从前端发送的消息中提取，而不是创建新会话）
+            # 格式化为 LLM 可用的历史记录格式
+            history_messages = []
+            for msg in request.messages[:-1]:  # 排除最后一条（当前查询）
+                role = msg.get('role', '')
+                content = extract_text_content(msg.get('content', ''))
+                if role in ['user', 'assistant'] and content:
+                    history_messages.append(f"{role}: {content}")
+
+            history = "\n".join(history_messages) if history_messages else ""
+
+            # 4. 发送思考过程 - 检索文档
+            yield f'data: {json.dumps({"type": "reasoning", "content": "🔍 正在检索相关文档..."})}\n\n'
+            await asyncio.sleep(0.05)
+
+            # 5. 调用 DSPy Pipeline 处理（传入真实的对话历史）
+            result = pipeline.process_query(query, history)
+
+            # 7. 发送意图识别结果
+            if result.get('intent'):
+                intent_text = f"识别意图: {result['intent']}\\n置信度: {result.get('confidence', 'N/A')}"
+                yield f'data: {json.dumps({"type": "reasoning", "content": intent_text})}\n\n'
+                await asyncio.sleep(0.05)
+
+            # 8. 发送推理依据（来源文档）
+            if result.get('sources'):
+                sources_markdown = "\\n".join([
+                    f"### 来源 {i+1}: {s.get('document', 'Unknown')}\\n**相似度**: {(s.get('score', 0)*100):.1f}%\\n**内容**: {s.get('content', '')[:200]}..."
+                    for i, s in enumerate(result['sources'][:3])
+                ])
+                file_content = f"# 检索到的参考文档\\n\\n{sources_markdown}"
+                yield f'data: {json.dumps({"type": "file", "content": file_content})}\n\n'
+                await asyncio.sleep(0.05)
+
+            # 9. 发送思考过程 - 生成回答
+            yield f'data: {json.dumps({"type": "reasoning", "content": "💡 基于检索结果生成回答..."})}\n\n'
+            await asyncio.sleep(0.05)
+
+            # 10. 发送正式回复（处理不同的响应类型）
+            result_type = result.get('type', 'answer')
+
+            if result_type == 'clarification':
+                # 需要澄清的情况
+                response_text = result.get('question', '抱歉，我需要更多信息。')
+                if result.get('options'):
+                    options_text = "\\n".join([f"{i+1}. {opt}" for i, opt in enumerate(result['options'])])
+                    response_text += f"\\n\\n{options_text}"
+            elif result_type == 'chitchat':
+                response_text = result.get('response', '您好！有什么我可以帮您的吗？')
+            elif result_type == 'no_results':
+                response_text = result.get('response', '抱歉，我没有找到相关的文档内容。')
+            else:  # answer type
+                response_text = result.get('response', '抱歉，无法生成回答。')
+
+            yield f'data: {json.dumps({"type": "content", "content": response_text})}\n\n'
+
+            # 注意：对话历史由前端管理，后端不需要保存到数据库
+
+            # 13. 发送完成标记
+            yield f'data: {json.dumps({"type": "done", "content": ""})}\n\n'
+
+        except Exception as e:
+            import traceback
+            error_detail = f"{str(e)}\\n{traceback.format_exc()}"
+            print(f"Agent react error: {error_detail}")
+            error_msg = str(e)
+            yield f'data: {json.dumps({"type": "error", "content": error_msg})}\n\n'
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Content-Type-Options": "nosniff"
+        }
+    )
+
+
 @app.get("/")
 async def root():
     """API根路径"""
@@ -915,7 +1099,11 @@ async def root():
             "vectorize_single": "POST /api/chunks/{chunk_id}/vectorize",
             "vectorization_stats": "GET /api/vectorization/stats",
             "vectorizable_chunks": "GET /api/chunks/vectorizable",
-            "search": "POST /api/chunks/search"
+            "search": "POST /api/chunks/search",
+            "chat": "POST /api/chat/message",
+            "assistants": "GET /api/assistants",
+            "tools": "GET /api/agent/tools",
+            "react": "POST /api/agent/react"
         }
     }
 

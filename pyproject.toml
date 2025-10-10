@@ -19,4 +19,6 @@ dependencies = [
     "numpy>=1.24.0",
     "httpx>=0.28.1",
     "python-dotenv>=1.1.1",
+    "dspy-ai>=3.0.3",
+    "dspy>=3.0.3",
 ]
