@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# 配置 pip 使用国内镜像源加速（清华源）
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
 # 安装 uv（Python 包管理器）- 使用 pip 安装更可靠
 RUN pip install --no-cache-dir uv
 
@@ -21,8 +24,8 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 COPY . .
 
-# 安装 Python 依赖
-RUN uv sync --frozen
+# 安装 Python 依赖（使用国内镜像源加速）
+RUN uv sync --frozen --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 暴露端口
 EXPOSE 8000

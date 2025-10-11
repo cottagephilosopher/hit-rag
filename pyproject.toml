@@ -21,4 +21,5 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "dspy-ai>=3.0.3",
     "dspy>=3.0.3",
+    "loguru>=0.7.3",
 ]

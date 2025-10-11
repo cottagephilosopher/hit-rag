@@ -6,6 +6,7 @@ Milvus 向量存储
 import os
 import json
 import time
+import hashlib
 import logging
 from typing import List, Dict, Any, Optional
 from langchain_milvus import Milvus
@@ -44,7 +45,7 @@ class RAGVectorStore:
                 connection_args={"uri": milvus_uri},
                 collection_name=self.collection_name,
                 drop_old=False,  # 不删除已存在的 collection
-                auto_id=True,  # 自动生成 ID
+                auto_id=False,  # 使用内容 hash 作为确定性 ID，实现自动去重
             )
 
             logger.info("✅ Milvus vector store initialized successfully")
@@ -53,9 +54,30 @@ class RAGVectorStore:
             logger.error(f"❌ Failed to initialize Milvus vector store: {e}")
             raise
 
+    @staticmethod
+    def _compute_content_hash(content: str, user_tag: str = '') -> str:
+        """
+        计算内容的 hash 值作为确定性 ID
+
+        使用 SHA256 生成 64 位十六进制字符串
+        相同的内容（包括 user_tag）会产生相同的 ID，实现自动去重
+
+        Args:
+            content: 原始文本内容
+            user_tag: 用户标签（影响向量化）
+
+        Returns:
+            64 位十六进制字符串
+        """
+        # 组合 user_tag 和 content，因为它们共同决定向量化的文本
+        combined = f"{user_tag}||{content}"
+        return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
     def add_chunks(self, chunks: List[Dict[str, Any]], document_tags: List[str] = None) -> List[str]:
         """
         批量添加 chunks 到向量库
+
+        使用内容 hash 作为 ID，相同内容会自动覆盖（去重）
 
         Args:
             chunks: chunk 字典列表，每个 chunk 包含:
@@ -69,7 +91,7 @@ class RAGVectorStore:
             document_tags: 文档级别的标签列表
 
         Returns:
-            Milvus 向量 ID 列表
+            Milvus 向量 ID 列表（基于内容 hash）
 
         Raises:
             ValueError: 如果 chunks 为空或格式不正确
@@ -78,9 +100,10 @@ class RAGVectorStore:
         if not chunks:
             raise ValueError("Chunks list cannot be empty")
 
-        logger.info(f"Adding {len(chunks)} chunks to Milvus...")
+        logger.info(f"Adding {len(chunks)} chunks to Milvus (with deduplication)...")
 
         documents = []
+        content_hashes = []
         for chunk in chunks:
             try:
                 # 优先使用 edited_content，如果不存在则使用 content
@@ -88,6 +111,13 @@ class RAGVectorStore:
                 if not content:
                     logger.warning(f"Chunk {chunk.get('id')} has no content, skipping")
                     continue
+
+                # 获取 user_tag（用于 hash 计算和向量化）
+                user_tag = chunk.get('user_tag', '') or ''
+
+                # 计算内容 hash 作为确定性 ID
+                content_hash = self._compute_content_hash(content, user_tag)
+                content_hashes.append(content_hash)
 
                 # 构建元数据
                 # 注意: Milvus 要求所有字段都必须有值，None 会导致数据不一致错误
@@ -103,18 +133,18 @@ class RAGVectorStore:
                     'document_id': chunk.get('document_id', 0),
                     'chunk_id': chunk.get('chunk_id', 0),
                     'source_file': chunk.get('source_file', '') or 'unknown',
-                    'user_tag': chunk.get('user_tag', '') or 'none',
-                    'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签                
+                    'user_tag': user_tag or 'none',
+                    'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签
                     'is_atomic': bool(chunk.get('is_atomic', False)),
                     'atomic_type': chunk.get('atomic_type') or 'none',  # 重要: 不能为空字符串或 None
                     'token_count': chunk.get('token_count', 0),
                     'vectorized_at': int(time.time()),
-                    'original_content': content, 
+                    'original_content': content,
+                    'content_hash': content_hash,  # 保存 hash 值用于追踪
                 }
 
                 # 创建向量化文本：user_tag + content
                 # user_tag 作为标题，应该有更高的权重，所以重复3次
-                user_tag = chunk.get('user_tag', '')
                 if user_tag and user_tag != 'none':
                     # 将标题重复3次以提高其在向量中的权重
                     vectorize_text = f"{user_tag}\n{user_tag}\n{user_tag}\n\n{content}"
@@ -137,11 +167,11 @@ class RAGVectorStore:
             raise ValueError("No valid documents to add")
 
         try:
-            # 使用 LangChain 的 add_documents 方法
-            # 它会自动处理 embedding 和批次
-            ids = self.vector_store.add_documents(documents)
+            # 使用 LangChain 的 add_documents 方法，传入确定性 ID
+            # 相同的 ID 会自动覆盖，实现去重
+            ids = self.vector_store.add_documents(documents, ids=content_hashes)
 
-            logger.info(f"✅ Successfully added {len(ids)} chunks to Milvus")
+            logger.info(f"✅ Successfully added {len(ids)} chunks to Milvus (duplicates auto-replaced)")
             return ids
 
         except Exception as e:

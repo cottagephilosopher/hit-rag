@@ -44,7 +44,7 @@ FROM docker.m.daocloud.io/library/nginx:alpine
 RUN apk add --no-cache nodejs npm
 
 # 复制 Nginx 配置
-COPY hit-rag/nginx-unified.conf /etc/nginx/conf.d/default.conf
+COPY hit-rag/deploy/nginx-unified.conf /etc/nginx/conf.d/default.conf
 
 # 复制 Vue.js 构建产物到 Nginx
 COPY --from=build-vue-ui /build-vue/dist /usr/share/nginx/html/ui
