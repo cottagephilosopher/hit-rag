@@ -84,6 +84,6 @@ class ResponseGeneration(dspy.Signature):
     clarification_hint = dspy.InputField(desc="可选的澄清提示（如果需要在回答后引导用户）", default="")
     intent_note = dspy.InputField(desc="意图识别备注（如：闲聊置信度不足，基于知识库尝试回答）", default="")
 
-    response = dspy.OutputField(desc="生成的回复，必须使用 Markdown 格式。对于文档中的图片链接，使用 ![图片描述](图片URL) 语法直接嵌入图片（不要用普通链接）。使用标准Markdown：列表、标题、加粗、代码块等。要求准确、简洁、有帮助。如果有 intent_note，在回答开头简短说明（如：💭 检测到您的问题可能是闲聊，但我在知识库中找到了相关内容：）。如果有 clarification_hint，在回答末尾自然地引导用户提供更多信息（非生硬的反问）")
+    response = dspy.OutputField(desc="生成的回复，必须使用 Markdown 格式。对于文档中的图片链接，使用 ![图片描述](图片URL) 语法直接嵌入图片（不要用普通链接）。使用标准Markdown：列表、标题、加粗、代码块等。要求准确、简洁、有帮助。如果有 clarification_hint，在回答末尾自然地引导用户提供更多信息（非生硬的反问）")
     source_ids = dspy.OutputField(desc="引用的文档片段ID列表，JSON格式")
     confidence = dspy.OutputField(desc="回复置信度 0.0-1.0")

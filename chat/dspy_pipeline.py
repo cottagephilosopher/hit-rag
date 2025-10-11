@@ -7,8 +7,10 @@ import dspy
 import json
 import os
 import requests
+import asyncio
+import uuid
 from loguru import logger
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 
 from .dspy_signatures import (
     IntentClassification,
@@ -17,6 +19,7 @@ from .dspy_signatures import (
     ClarificationGeneration,
     ResponseGeneration
 )
+from .memory_cache import ConversationMemoryCache
 
 
 class DSPyRAGPipeline:
@@ -27,7 +30,7 @@ class DSPyRAGPipeline:
         vector_store=None,
         llm_model: str = "gpt-4o-mini",
         temperature: float = 0.7,
-        confidence_threshold: float = 0.5
+        confidence_threshold: float = None
     ):
         """
         初始化 DSPy Pipeline
@@ -36,14 +39,33 @@ class DSPyRAGPipeline:
             vector_store: 向量存储实例（Milvus）
             llm_model: LLM 模型名称
             temperature: 生成温度
-            confidence_threshold: 置信度阈值
+            confidence_threshold: 置信度阈值（可选，默认从环境变量读取）
         """
         self.vector_store = vector_store
-        self.confidence_threshold = confidence_threshold
 
         # 读取闲聊模式配置
         self.enable_chat_mode = os.getenv('ENABLE_CHAT_MODE', 'false').lower() == 'true'
         self.chat_mode_threshold = float(os.getenv('CHAT_MODE_THRESHOLD', '0.7'))
+
+        # 读取 RAG Pipeline 阈值配置
+        self.confidence_threshold = confidence_threshold or float(os.getenv('RAG_CONFIDENCE_THRESHOLD', '0.5'))
+
+        # 相关性阈值
+        self.rerank_score_threshold = float(os.getenv('RAG_RERANK_SCORE_THRESHOLD', '0.2'))
+        self.l2_distance_threshold = float(os.getenv('RAG_L2_DISTANCE_THRESHOLD', '1.2'))
+
+        # 检索质量阈值
+        self.rerank_good_threshold = float(os.getenv('RAG_RERANK_GOOD_THRESHOLD', '0.2'))
+        self.rerank_excellent_threshold = float(os.getenv('RAG_RERANK_EXCELLENT_THRESHOLD', '0.3'))
+        self.l2_good_threshold = float(os.getenv('RAG_L2_GOOD_THRESHOLD', '1.2'))
+        self.l2_excellent_threshold = float(os.getenv('RAG_L2_EXCELLENT_THRESHOLD', '1.0'))
+
+        # 检索数量配置
+        self.entity_top_k = int(os.getenv('RAG_ENTITY_TOP_K', '3'))
+        self.multi_entity_dedup_limit = int(os.getenv('RAG_MULTI_ENTITY_DEDUP_LIMIT', '15'))
+        self.rerank_top_n = int(os.getenv('RAG_RERANK_TOP_N', '8'))
+        self.single_query_top_k = int(os.getenv('RAG_SINGLE_QUERY_TOP_K', '8'))
+        self.files_display_limit = int(os.getenv('RAG_FILES_DISPLAY_LIMIT', '5'))
 
         # 配置 DSPy LLM
         self._configure_dspy(llm_model, temperature)
@@ -54,9 +76,37 @@ class DSPyRAGPipeline:
         self.confidence_evaluator = dspy.ChainOfThought(ConfidenceEvaluation)
         self.clarification_generator = dspy.ChainOfThought(ClarificationGeneration)
         self.response_generator = dspy.ChainOfThought(ResponseGeneration)
+        memory_window = int(os.getenv('CHAT_MEMORY_MAX_ITEMS', '3'))
+        self.memory_cache = ConversationMemoryCache(max_items=memory_window)
 
         logger.info(f"✅ DSPy RAG Pipeline initialized with model: {llm_model}")
         logger.info(f"   闲聊模式: {'开启' if self.enable_chat_mode else '关闭'} (置信度阈值: {self.chat_mode_threshold})")
+        logger.info(f"   置信度阈值: {self.confidence_threshold}")
+        logger.info(f"   相关性阈值: Rerank={self.rerank_score_threshold}, L2={self.l2_distance_threshold}")
+        logger.info(f"   检索数量: 单实体={self.entity_top_k}, 去重={self.multi_entity_dedup_limit}, 重排={self.rerank_top_n}")
+        logger.info(f"   对话记忆缓存窗口: {memory_window}")
+
+    @staticmethod
+    def _build_history_chunk(conversation_history: str) -> Optional[Dict[str, Any]]:
+        """将纯文本对话历史包装成检索片段，用于回退"""
+        cleaned = (conversation_history or "").strip()
+        if not cleaned:
+            return None
+
+        max_length = 2000
+        if len(cleaned) > max_length:
+            cleaned = cleaned[-max_length:]
+
+        return {
+            "chunk_id": f"history-{uuid.uuid4()}",
+            "content": cleaned,
+            "document": "conversation_history",
+            "score": 0.0,
+            "metadata": {
+                "type": "conversation_history",
+                "source": "conversation_manager"
+            }
+        }
 
     def _configure_dspy(self, model: str, temperature: float):
         """配置 DSPy 的 LLM"""
@@ -548,7 +598,8 @@ class DSPyRAGPipeline:
         user_query: str,
         conversation_history: str = "",
         filters: Dict = None,
-        force_answer: bool = False
+        force_answer: bool = False,
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         完整处理用户查询（主入口）
@@ -558,6 +609,7 @@ class DSPyRAGPipeline:
             conversation_history: 对话历史
             filters: 检索过滤条件
             force_answer: 是否强制回答（不生成澄清问题）
+            session_id: 会话ID，用于记忆缓存
 
         Returns:
             处理结果
@@ -576,6 +628,7 @@ class DSPyRAGPipeline:
                 llm_response = self.generate_chitchat_response(user_query, conversation_history)
                 # 在回复末尾添加明显的 AI 生成提醒
                 llm_response_with_notice = f"{llm_response}\n\n---\n⚠️ **提示**：此回复由 AI 生成，仅供参考，请注意甄别。"
+                self.memory_cache.add_exchange(session_id, user_query, llm_response_with_notice)
                 return {
                     "type": "chitchat",
                     "response": llm_response_with_notice,
@@ -585,9 +638,11 @@ class DSPyRAGPipeline:
             else:
                 # 未开启闲聊模式，使用固定回复
                 logger.info(f"  闲聊模式未开启，使用固定回复")
+                fixed_reply = "您好！我是文档助手，专门帮助您查找和理解文档内容。有什么我可以帮您的吗？"
+                self.memory_cache.add_exchange(session_id, user_query, fixed_reply)
                 return {
                     "type": "chitchat",
-                    "response": "您好！我是文档助手，专门帮助您查找和理解文档内容。有什么我可以帮您的吗？",
+                    "response": fixed_reply,
                     "intent": intent_result,
                     "chat_mode": "fixed"
                 }
@@ -628,59 +683,95 @@ class DSPyRAGPipeline:
             logger.info(f"  🔍 Single query search: {optimized_query[:50]}...")
             chunks = self.retrieve_chunks(optimized_query, top_k=8, filters=filters)
 
+        memory_fallback = False
         if not chunks:
-            return {
-                "type": "no_results",
-                "response": "抱歉，我没有找到相关的文档内容。您可以换个方式提问吗？",
-                "intent": intent_result,
-                "rewrite": rewrite_result,
-                "sources": []
-            }
+            memory_chunks = self.memory_cache.get_context_chunks(session_id)
+            logger.info(f"  Memory fallback check (no retrieval): {len(memory_chunks)} cached exchanges")
+            if memory_chunks:
+                logger.info("  🔁 No retrieval results, falling back to conversation memory")
+                chunks = memory_chunks
+                memory_fallback = True
+            else:
+                history_chunk = self._build_history_chunk(conversation_history)
+                if history_chunk:
+                    logger.info("  🔁 No retrieval results, falling back to formatted conversation history")
+                    chunks = [history_chunk]
+                    memory_fallback = True
+                else:
+                    return {
+                        "type": "no_results",
+                        "response": "抱歉，我没有找到相关的文档内容。您可以换个方式提问吗？",
+                        "intent": intent_result,
+                        "rewrite": rewrite_result,
+                        "sources": []
+                    }
 
         # 3.5. 检查相似度分数，过滤掉不相关的检索结果
-        # 优先使用重排分数（rerank_score），否则使用 L2 距离（score）
-        # - rerank_score: 0.3+ 相关，0.5+ 很相关
-        # - L2距离: <0.8 很相关, <1.0 相关, <1.2 可能相关, >1.2 不相关
+        has_rerank = not memory_fallback and any('rerank_score' in c for c in chunks)
+        best_score = 1.0
 
-        # 计算最佳相似度指标
-        has_rerank = any('rerank_score' in c for c in chunks)
+        if not memory_fallback:
+            if has_rerank:
+                best_score = max(c.get('rerank_score', 0) for c in chunks) if chunks else 0
+                score_threshold = self.rerank_score_threshold
+                is_relevant = best_score >= score_threshold
+                score_type = "rerank"
+            else:
+                best_score = min(c.get('score', float('inf')) for c in chunks) if chunks else float('inf')
+                score_threshold = self.l2_distance_threshold
+                is_relevant = best_score <= score_threshold
+                score_type = "L2"
 
-        if has_rerank:
-            # 使用重排分数（越大越好）
-            best_score = max(c.get('rerank_score', 0) for c in chunks) if chunks else 0
-            score_threshold = 0.2  # rerank_score 低于 0.2 认为不相关
-            is_relevant = best_score >= score_threshold
-            score_type = "rerank"
-        else:
-            # 使用 L2 距离（越小越好）
-            best_score = min(c.get('score', float('inf')) for c in chunks) if chunks else float('inf')
-            score_threshold = 1.2  # L2 距离高于 1.2 认为不相关
-            is_relevant = best_score <= score_threshold
-            score_type = "L2"
+            if not is_relevant:
+                memory_chunks = self.memory_cache.get_context_chunks(session_id)
+                logger.info(f"  Memory fallback check (low relevance): {len(memory_chunks)} cached exchanges")
+                if memory_chunks:
+                    logger.info(f"  {score_type} score below threshold ({best_score:.3f}); using conversation memory fallback")
+                    chunks = memory_chunks
+                    memory_fallback = True
+                    has_rerank = False
+                else:
+                    history_chunk = self._build_history_chunk(conversation_history)
+                    if history_chunk:
+                        logger.info(f"  {score_type} score below threshold ({best_score:.3f}); using conversation history fallback")
+                        chunks = [history_chunk]
+                        memory_fallback = True
+                        has_rerank = False
+                    else:
+                        logger.info(f"  {score_type} score indicates no relevant results: {best_score:.3f}")
+                        return {
+                            "type": "no_results",
+                            "response": "抱歉，我的知识库中没有找到相关的文档内容。我只能回答与已有文档相关的问题。",
+                            "intent": intent_result,
+                            "rewrite": rewrite_result,
+                            "sources": []
+                        }
 
-        if not is_relevant:
-            logger.info(f"  {score_type} score indicates no relevant results: {best_score:.3f}")
-            return {
-                "type": "no_results",
-                "response": "抱歉，我的知识库中没有找到相关的文档内容。我只能回答与已有文档相关的问题。",
-                "intent": intent_result,
-                "rewrite": rewrite_result,
-                "sources": []
+        if memory_fallback:
+            best_score = 1.0
+            eval_result = {
+                "is_sufficient": True,
+                "has_ambiguity": False,
+                "confidence": 0.65,
+                "ambiguity_type": "none",
+                "clarification_hint": "",
+                "reasoning": "使用对话记忆生成回复"
             }
-
-        # 4. 评估置信度和二义性
-        eval_result = self.evaluate_confidence(user_query, chunks)
-        logger.info(f"  Evaluation: sufficient={eval_result['is_sufficient']}, ambiguity={eval_result['has_ambiguity']} ({eval_result['ambiguity_type']}), score: {best_score:.3f}")
+            logger.info("  Using conversation memory, skip relevance evaluation")
+        else:
+            eval_result = self.evaluate_confidence(user_query, chunks)
+            logger.info(f"  Evaluation: sufficient={eval_result['is_sufficient']}, ambiguity={eval_result['has_ambiguity']} ({eval_result['ambiguity_type']}), score: {best_score:.3f}")
 
         # 5. 判断检索质量
-        if has_rerank:
-            # rerank_score: 0.2+ 可用，0.3+ 良好，0.5+ 优秀
-            retrieval_is_good = best_score >= 0.2
-            retrieval_is_excellent = best_score >= 0.3
+        if memory_fallback:
+            retrieval_is_good = True
+            retrieval_is_excellent = True
+        elif has_rerank:
+            retrieval_is_good = best_score >= self.rerank_good_threshold
+            retrieval_is_excellent = best_score >= self.rerank_excellent_threshold
         else:
-            # L2 距离: <1.2 可用，<1.0 良好，<0.8 优秀
-            retrieval_is_good = best_score < 1.2
-            retrieval_is_excellent = best_score < 1.0
+            retrieval_is_good = best_score < self.l2_good_threshold
+            retrieval_is_excellent = best_score < self.l2_excellent_threshold
 
         # 6. 决定回答策略
         # 新策略：只要检索到内容，就基于内容回答（可带澄清）
@@ -722,21 +813,442 @@ class DSPyRAGPipeline:
             logger.info(f"  Retrieval quality: {'excellent' if retrieval_is_excellent else 'good'}, direct answer")
 
         # 7. 生成回复（带或不带澄清提示）
+        generation_chunks = chunks
+        if not memory_fallback:
+            history_chunk = self._build_history_chunk(conversation_history)
+            if history_chunk:
+                generation_chunks = chunks + [history_chunk]
+
         response_result = self.generate_response(
             user_query,
-            chunks,
+            generation_chunks,
             conversation_history,
             clarification_hint=clarification_hint,
             intent_note=intent_note
         )
 
+        self.memory_cache.add_exchange(session_id, user_query, response_result['response'])
+
         return {
             "type": response_type,
             "response": response_result['response'],
             "confidence": response_result['confidence'],
-            "sources": chunks,
+            "sources": generation_chunks,
             "source_ids": response_result['source_ids'],
             "intent": intent_result,
             "rewrite": rewrite_result,
             "evaluation": eval_result
         }
+
+    async def process_query_stream(
+        self,
+        user_query: str,
+        conversation_history: str = "",
+        filters: Dict = None,
+        force_answer: bool = False,
+        session_id: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式处理用户查询，每个步骤完成时立即 yield 结果
+
+        Args:
+            user_query: 用户查询
+            conversation_history: 对话历史
+            filters: 检索过滤条件
+            force_answer: 是否强制回答
+            session_id: 会话ID，用于记忆缓存
+
+        Yields:
+            每个处理步骤的中间结果
+        """
+        logger.info(f"🔍 [STREAM] Processing query: {user_query[:100]}...")
+
+        # 步骤1: 意图识别
+        # 发送 reasoning 消息（符合前端规范）
+        yield {"type": "reasoning", "content": "🔍 正在识别意图..."}
+        await asyncio.sleep(0)
+
+        # 在线程池中执行同步调用，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        intent_result = await loop.run_in_executor(
+            None,
+            self.classify_intent,
+            user_query,
+            conversation_history
+        )
+        logger.info(f"  Intent: {intent_result['intent']} (confidence: {intent_result['confidence']})")
+
+        # 构建详细的意图识别结果消息
+        intent_msg = f"✓ 意图识别完成\n"
+        intent_msg += f"  • 意图类型: {intent_result['intent']}\n"
+        intent_msg += f"  • 置信度: {intent_result['confidence']:.2f}\n"
+        intent_msg += f"  • 业务相关性: {intent_result['business_relevance']}"
+
+        yield {"type": "reasoning", "content": intent_msg}
+        await asyncio.sleep(0)
+
+        # 如果是闲聊且置信度高，根据配置决定回复方式
+        if intent_result['intent'] == 'chitchat' and intent_result['confidence'] >= self.chat_mode_threshold:
+            if self.enable_chat_mode:
+                yield {"type": "reasoning", "content": "检测到闲聊意图，正在生成回复..."}
+                await asyncio.sleep(0)
+
+                llm_response = self.generate_chitchat_response(user_query, conversation_history)
+                llm_response_with_notice = f"{llm_response}\n\n---\n⚠️ **提示**：此回复由 AI 生成，仅供参考，请注意甄别。"
+                self.memory_cache.add_exchange(session_id, user_query, llm_response_with_notice)
+
+                yield {"type": "content", "content": llm_response_with_notice}
+                await asyncio.sleep(0)
+
+                yield {"type": "done"}
+                await asyncio.sleep(0)
+                return
+            else:
+                fixed_reply = "您好！我是文档助手，专门帮助您查找和理解文档内容。有什么我可以帮您的吗？"
+
+                yield {"type": "content", "content": fixed_reply}
+                await asyncio.sleep(0)
+
+                yield {"type": "done"}
+                await asyncio.sleep(0)
+
+                self.memory_cache.add_exchange(session_id, user_query, fixed_reply)
+                return
+
+        # 步骤2: 查询改写
+        intent_note = ""
+        if intent_result['intent'] == 'chitchat' and intent_result['confidence'] < self.chat_mode_threshold:
+            logger.info(f"  闲聊意图置信度不足，继续检索知识库")
+            intent_note = "检测到您的问题可能偏向闲聊，但我尝试在知识库中为您查找相关内容"
+
+        yield {"type": "reasoning", "content": "📝 正在优化查询..."}
+        await asyncio.sleep(0)
+
+        rewrite_result = await loop.run_in_executor(
+            None,
+            self.rewrite_query,
+            user_query,
+            conversation_history
+        )
+        optimized_query = rewrite_result['rewritten_query']
+        logger.info(f"  Rewritten query: {optimized_query[:100]}...")
+
+        # 构建详细的查询改写结果消息
+        rewrite_msg = f"✓ 查询优化完成\n"
+        rewrite_msg += f"  • 原始查询: {user_query}\n"
+        rewrite_msg += f"  • 优化后查询: {optimized_query}\n"
+        key_entities = rewrite_result.get('key_entities', [])
+        if key_entities:
+            rewrite_msg += f"  • 关键实体: {', '.join(key_entities)}\n"
+        rewrite_msg += f"  • 检索策略: {rewrite_result.get('search_strategy', 'semantic')}"
+
+        yield {"type": "reasoning", "content": rewrite_msg}
+        await asyncio.sleep(0)
+
+        # 步骤3: 向量检索
+        yield {"type": "reasoning", "content": "🔎 正在检索相关文档..."}
+        await asyncio.sleep(0)
+
+        key_entities = rewrite_result.get('key_entities', [])
+
+        if key_entities and len(key_entities) > 1:
+            logger.info(f"  🔍 Multi-entity search with: {key_entities}")
+            all_chunks = []
+            for entity in key_entities:
+                entity_chunks = await loop.run_in_executor(
+                    None,
+                    self.retrieve_chunks,
+                    entity,
+                    self.entity_top_k,
+                    filters
+                )
+                all_chunks.extend(entity_chunks)
+                logger.info(f"    - Entity '{entity}': found {len(entity_chunks)} chunks")
+
+            chunks = self._deduplicate_chunks(all_chunks)[:self.multi_entity_dedup_limit]
+            logger.info(f"  ✅ After deduplication: {len(chunks)} unique chunks")
+
+            yield {"type": "reasoning", "content": "🔄 正在重排序检索结果..."}
+            await asyncio.sleep(0)
+            chunks = await loop.run_in_executor(
+                None,
+                self.rerank_chunks,
+                user_query,
+                chunks,
+                self.rerank_top_n
+            )
+        else:
+            logger.info(f"  🔍 Single query search: {optimized_query[:50]}...")
+            chunks = await loop.run_in_executor(
+                None,
+                self.retrieve_chunks,
+                optimized_query,
+                self.single_query_top_k,
+                filters
+            )
+
+        memory_fallback = False
+        if not chunks:
+            memory_chunks = self.memory_cache.get_context_chunks(session_id)
+            logger.info(f"  Memory fallback check (no retrieval): {len(memory_chunks)} cached exchanges")
+            if memory_chunks:
+                memory_fallback = True
+                chunks = memory_chunks
+                logger.info("  🔁 No retrieval results, falling back to conversation memory")
+                yield {"type": "reasoning", "content": "📎 未检索到文档，改用最近的对话记忆继续回答"}
+                await asyncio.sleep(0)
+            else:
+                history_chunk = self._build_history_chunk(conversation_history)
+                if history_chunk:
+                    memory_fallback = True
+                    chunks = [history_chunk]
+                    logger.info("  🔁 No retrieval results, falling back to formatted conversation history")
+                    yield {"type": "reasoning", "content": "📎 未检索到文档，改用之前的对话内容继续回答"}
+                    await asyncio.sleep(0)
+
+        # 构建详细的检索结果消息
+        if memory_fallback:
+            retrieval_msg = f"✓ 未命中文档片段，使用最近 {len(chunks)} 条对话记忆继续推理"
+        else:
+            retrieval_msg = f"✓ 检索完成\n  • 找到 {len(chunks)} 个相关片段"
+            if chunks:
+                # 显示前3个片段的来源和分数
+                for i, chunk in enumerate(chunks[:3], 1):
+                    score = chunk.get('rerank_score') or chunk.get('score', 0)
+                    score_type = 'rerank' if 'rerank_score' in chunk else 'L2'
+                    doc_name = chunk.get('document', 'Unknown')[:40]
+                    retrieval_msg += f"\n  • [{i}] {doc_name} ({score:.3f})"
+                if len(chunks) > 3:
+                    retrieval_msg += f"\n  • ... 还有 {len(chunks) - 3} 个片段"
+
+        yield {"type": "reasoning", "content": retrieval_msg}
+        await asyncio.sleep(0)
+
+        # 发送检索结果的 canvas 表格可视化
+        if chunks and len(chunks) > 0 and not memory_fallback:
+            # 构建 Markdown 表格
+            table_md = "## 📚 检索结果详情\n\n"
+            table_md += "| 排名 | 文档来源 | 相关性 | 内容预览 |\n"
+            table_md += "|------|----------|--------|----------|\n"
+
+            for i, chunk in enumerate(chunks[:5], 1):
+                score = chunk.get('rerank_score') or chunk.get('score', 0)
+                score_type = 'rerank' if 'rerank_score' in chunk else 'L2'
+                doc_name = chunk.get('document', 'Unknown')[:30]
+                content_preview = chunk.get('content', '')[:60].replace('\n', ' ').replace('|', '\\|')
+                table_md += f"| {i} | {doc_name} | {score:.3f} ({score_type}) | {content_preview}... |\n"
+
+            yield {
+                "type": "canvas",
+                "content": {
+                    "canvas-type": "markdown",
+                    "canvas-source": table_md
+                }
+            }
+            await asyncio.sleep(0)
+
+        if not chunks:
+            # 输出未找到任何内容的详细信息
+            no_results_msg = f"❌ 检索结果: 未找到任何内容\n"
+            no_results_msg += f"  • 使用的查询: {optimized_query}\n"
+            if key_entities:
+                no_results_msg += f"  • 尝试的关键词: {', '.join(key_entities)}\n"
+            no_results_msg += f"  • 检索策略: {rewrite_result.get('search_strategy', 'semantic')}\n"
+            no_results_msg += f"\n💡 可能的原因:\n"
+            no_results_msg += f"  • 知识库中没有相关文档\n"
+            no_results_msg += f"  • 关键词不匹配\n"
+            no_results_msg += f"  • 问题超出文档范围"
+
+            yield {"type": "reasoning", "content": no_results_msg}
+            await asyncio.sleep(0)
+
+            yield {
+                "type": "content",
+                "content": "抱歉，我没有找到相关的文档内容。\n\n建议：\n- 尝试使用其他关键词\n- 简化或具体化您的问题\n- 确认问题是否属于文档涵盖的范围"
+            }
+            await asyncio.sleep(0)
+
+            yield {"type": "done"}
+            await asyncio.sleep(0)
+            return
+
+        # 步骤4: 评估相似度和置信度
+        yield {"type": "reasoning", "content": "⚖️  正在评估检索结果质量..."}
+        await asyncio.sleep(0)
+
+        # 计算相似度
+        has_rerank = not memory_fallback and any('rerank_score' in c for c in chunks)
+        best_score = 1.0
+
+        if not memory_fallback:
+            if has_rerank:
+                best_score = max(c.get('rerank_score', 0) for c in chunks) if chunks else 0
+                score_threshold = self.rerank_score_threshold
+                is_relevant = best_score >= score_threshold
+                score_type = "rerank"
+            else:
+                best_score = min(c.get('score', float('inf')) for c in chunks) if chunks else float('inf')
+                score_threshold = self.l2_distance_threshold
+                is_relevant = best_score <= score_threshold
+                score_type = "L2"
+
+            if not is_relevant:
+                memory_chunks = self.memory_cache.get_context_chunks(session_id)
+                logger.info(f"  Memory fallback check (low relevance): {len(memory_chunks)} cached exchanges")
+                if memory_chunks:
+                    memory_fallback = True
+                    chunks = memory_chunks
+                    has_rerank = False
+                    original_score = best_score
+                    best_score = 1.0
+                    logger.info(f"  {score_type} score below threshold ({original_score:.3f}); using conversation memory fallback")
+                    yield {"type": "reasoning", "content": "📎 检索相关度偏低，改用最近的对话记忆继续回答"}
+                    await asyncio.sleep(0)
+                else:
+                    history_chunk = self._build_history_chunk(conversation_history)
+                    if history_chunk:
+                        memory_fallback = True
+                        chunks = [history_chunk]
+                        has_rerank = False
+                        best_score = 1.0
+                        logger.info(f"  {score_type} score below threshold ({best_score:.3f}); using conversation history fallback")
+                        yield {"type": "reasoning", "content": "📎 检索相关度偏低，改用之前的对话内容继续回答"}
+                        await asyncio.sleep(0)
+                    else:
+                        logger.info(f"  {score_type} score indicates no relevant results: {best_score:.3f}")
+
+                        # 输出相关度过低的详细信息
+                        low_relevance_msg = f"⚠️  相关度评估: 未达到阈值\n"
+                        low_relevance_msg += f"  • 找到 {len(chunks)} 个片段，但相关度过低\n"
+                        low_relevance_msg += f"  • 最佳相关度分数: {best_score:.3f} ({score_type})\n"
+                        low_relevance_msg += f"  • 阈值要求: {score_threshold:.3f}\n"
+                        low_relevance_msg += f"  • 最相关的文档:\n"
+
+                        for i, chunk in enumerate(chunks[:3], 1):
+                            score = chunk.get('rerank_score') or chunk.get('score', 0)
+                            doc_name = chunk.get('document', 'Unknown')[:40]
+                            low_relevance_msg += f"    [{i}] {doc_name} (分数: {score:.3f})\n"
+
+                        low_relevance_msg += f"\n💡 建议：请尝试换个方式提问，或提供更具体的关键词"
+
+                        yield {"type": "reasoning", "content": low_relevance_msg}
+                        await asyncio.sleep(0)
+
+                        # 发送最终回复
+                        yield {
+                            "type": "content",
+                            "content": "抱歉，我的知识库中虽然找到了一些文档片段，但它们与您的问题相关度过低，无法给出可靠的回答。\n\n建议：\n- 尝试使用不同的关键词重新提问\n- 提供更具体的上下文信息\n- 确认问题是否在文档涵盖范围内"
+                        }
+                        await asyncio.sleep(0)
+
+                        yield {"type": "done"}
+                        await asyncio.sleep(0)
+                        return
+
+        if memory_fallback:
+            eval_result = {
+                "is_sufficient": True,
+                "has_ambiguity": False,
+                "confidence": 0.65,
+                "ambiguity_type": "none",
+                "clarification_hint": "",
+                "reasoning": "使用对话记忆生成回复"
+            }
+            logger.info("  Using conversation memory, skip confidence evaluation")
+        else:
+            eval_result = await loop.run_in_executor(
+                None,
+                self.evaluate_confidence,
+                user_query,
+                chunks
+            )
+            logger.info(f"  Evaluation: sufficient={eval_result['is_sufficient']}, ambiguity={eval_result['has_ambiguity']}")
+
+        # 构建详细的评估结果消息
+        eval_msg = f"✓ 评估完成\n"
+        eval_msg += f"  • 置信度: {eval_result['confidence']:.2f}\n"
+        eval_msg += f"  • 信息充分性: {'充分' if eval_result['is_sufficient'] else '不充分'}\n"
+        eval_msg += f"  • 是否有歧义: {'是' if eval_result['has_ambiguity'] else '否'}"
+        if eval_result.get('ambiguity_type') and eval_result['ambiguity_type'] != 'none':
+            eval_msg += f"\n  • 歧义类型: {eval_result['ambiguity_type']}"
+
+        yield {"type": "reasoning", "content": eval_msg}
+        await asyncio.sleep(0)
+
+        # 步骤5: 判断回答策略
+        if memory_fallback:
+            retrieval_is_good = True
+            retrieval_is_excellent = True
+        elif has_rerank:
+            retrieval_is_good = best_score >= self.rerank_good_threshold
+            retrieval_is_excellent = best_score >= self.rerank_excellent_threshold
+        else:
+            retrieval_is_good = best_score < self.l2_good_threshold
+            retrieval_is_excellent = best_score < self.l2_excellent_threshold
+
+        business_relevance = intent_result.get('business_relevance', 'medium')
+
+        if business_relevance == 'low' and not retrieval_is_good:
+            yield {
+                "type": "content",
+                "content": "抱歉，这个问题似乎超出了我的知识范围。我主要帮助解答产品手册、安装文档、说明书等相关问题。您可以换个产品相关的问题试试？"
+            }
+            await asyncio.sleep(0)
+
+            yield {"type": "done"}
+            await asyncio.sleep(0)
+            return
+
+        clarification_hint = ""
+        response_type = "answer"
+
+        if retrieval_is_good and eval_result['has_ambiguity'] and eval_result['clarification_hint']:
+            clarification_hint = eval_result['clarification_hint']
+            response_type = "answer_with_clarification"
+        elif retrieval_is_good and not eval_result['is_sufficient'] and eval_result.get('clarification_hint'):
+            clarification_hint = eval_result['clarification_hint']
+            response_type = "answer_with_clarification"
+
+        # 步骤6: 生成最终回复
+        yield {"type": "reasoning", "content": "💡 正在生成回复..."}
+        await asyncio.sleep(0)
+
+        generation_chunks = chunks
+        if not memory_fallback:
+            history_chunk = self._build_history_chunk(conversation_history)
+            if history_chunk:
+                generation_chunks = chunks + [history_chunk]
+
+        response_result = await loop.run_in_executor(
+            None,
+            self.generate_response,
+            user_query,
+            generation_chunks,
+            conversation_history,
+            clarification_hint,
+            intent_note
+        )
+
+        self.memory_cache.add_exchange(session_id, user_query, response_result['response'])
+
+        # 发送最终回复内容
+        yield {"type": "content", "content": response_result['response']}
+        await asyncio.sleep(0)
+
+        # 发送文件源信息
+        if not memory_fallback:
+            for chunk in generation_chunks[:self.files_display_limit]:
+                metadata_type = chunk.get('metadata', {}).get('type')
+                if metadata_type in {"conversation_history", "conversation_memory"}:
+                    continue
+                doc_name = chunk.get('document', 'Unknown')
+                file_path = chunk.get('metadata', {}).get('file_path', '')
+                if doc_name:
+                    yield {
+                        "type": "files",
+                        "content": {
+                            "fileName": doc_name,
+                            "filePath": file_path or f"#chunk-{chunk.get('chunk_id', '')}"
+                        }
+                    }
+                    await asyncio.sleep(0)

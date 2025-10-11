@@ -4,9 +4,11 @@
 """
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
+import json
 
 from chat.conversation_manager import ConversationManager
 from chat.dspy_pipeline import DSPyRAGPipeline
@@ -88,6 +90,116 @@ class SessionInfo(BaseModel):
 
 # ==================== API Routes ====================
 
+@router.post("/message/stream")
+async def send_message_stream(request: ChatMessageRequest):
+    """
+    发送消息并获取流式回复（SSE）
+
+    处理流程（流式）：
+    1. 创建或获取会话
+    2. 保存用户消息
+    3. 通过 DSPy Pipeline 流式处理查询
+    4. 每个步骤完成时立即推送 SSE 事件
+    5. 最后保存助手回复
+    """
+    try:
+        manager = get_conversation_manager()
+        pipeline = get_dspy_pipeline()
+
+        # 1. 创建或获取会话
+        if request.session_id:
+            session_id = request.session_id
+            session = manager.get_session_info(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="会话不存在")
+        else:
+            session_id = manager.create_session(metadata=request.context or {})
+            logger.info(f"📝 Created new session: {session_id}")
+        logger.debug("chat.message.stream using session %s", session_id)
+
+        # 2. 保存用户消息
+        manager.add_message(
+            session_id=session_id,
+            role="user",
+            content=request.message
+        )
+
+        # 3. 获取对话历史
+        conversation_history = manager.format_history_for_llm(session_id, limit=5)
+
+        # 4. 准备过滤条件
+        filters = None
+        if request.context:
+            pass  # TODO: 根据 context 构建过滤条件
+
+        # 5. 定义 SSE 生成器
+        async def event_generator():
+            """SSE 事件生成器 - 符合前端标准格式"""
+            try:
+                final_content = ""
+                final_sources = []
+
+                # 流式处理查询
+                async for chunk in pipeline.process_query_stream(
+                    user_query=request.message,
+                    conversation_history=conversation_history,
+                    filters=filters,
+                    session_id=session_id
+                ):
+                    # 按照标准 SSE 格式发送: data: {...}\n\n
+                    chunk_type = chunk.get("type", "unknown")
+
+                    # 保存最终内容用于存储到数据库
+                    if chunk_type == "content":
+                        final_content += chunk.get("content", "")
+                    elif chunk_type == "files":
+                        final_sources.append(chunk.get("content", {}))
+
+                    # 发送标准 SSE 格式
+                    event_data = json.dumps(chunk, ensure_ascii=False)
+                    yield f"data: {event_data}\n\n"
+
+                # 发送完成标记
+                yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+                # 保存助手回复到数据库
+                if final_content:
+                    manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=final_content,
+                        intent="question",
+                        sources=final_sources,
+                        metadata={}
+                    )
+
+            except Exception as e:
+                logger.error(f"❌ Stream error: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                error_data = json.dumps({"error": str(e)}, ensure_ascii=False)
+                yield f"event: error\ndata: {error_data}\n\n"
+
+        # 返回 StreamingResponse
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # 禁用 nginx 缓冲
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"流式消息处理失败: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_detail)
+        raise HTTPException(status_code=500, detail=f"流式消息处理失败: {str(e)}")
+
+
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_message(request: ChatMessageRequest):
     """
@@ -115,6 +227,7 @@ async def send_message(request: ChatMessageRequest):
             # 创建新会话
             session_id = manager.create_session(metadata=request.context or {})
             logger.info(f"📝 Created new session: {session_id}")
+        logger.debug("chat.message using session %s", session_id)
 
         # 2. 保存用户消息
         manager.add_message(
@@ -138,12 +251,17 @@ async def send_message(request: ChatMessageRequest):
         result = pipeline.process_query(
             user_query=request.message,
             conversation_history=conversation_history,
-            filters=filters
+            filters=filters,
+            session_id=session_id
         )
 
         # 5. 构建响应
         if result['type'] == 'answer':
             # 正常回答
+            filtered_sources = [
+                chunk for chunk in result.get('sources', [])
+                if chunk.get('metadata', {}).get('type') not in {"conversation_history", "conversation_memory"}
+            ]
             response_content = {
                 "type": "answer",
                 "content": result['response'],
@@ -154,7 +272,7 @@ async def send_message(request: ChatMessageRequest):
                         "content": chunk.get("content", "")[:200] + "...",  # 截断显示
                         "score": chunk.get("score", 0.0)
                     }
-                    for chunk in result.get('sources', [])[:5]
+                    for chunk in filtered_sources[:5]
                 ],
                 "confidence": result.get('confidence', 0.0)
             }
@@ -165,7 +283,7 @@ async def send_message(request: ChatMessageRequest):
                 role="assistant",
                 content=result['response'],
                 intent="question",
-                sources=result.get('sources', []),
+                sources=filtered_sources,
                 metadata={
                     "confidence": result.get('confidence'),
                     "rewritten_query": result.get('rewrite', {}).get('rewritten_query')
@@ -274,6 +392,13 @@ async def delete_session(session_id: str):
 
         if not success:
             raise HTTPException(status_code=404, detail="会话不存在")
+
+        global dspy_pipeline
+        try:
+            if dspy_pipeline is not None:
+                dspy_pipeline.memory_cache.clear(session_id)
+        except Exception as exc:  # noqa: BLE001 - 仅记录缓存清理失败
+            logger.warning("清理对话记忆缓存失败: %s", exc)
 
         return {"message": "会话已删除", "session_id": session_id}
 
