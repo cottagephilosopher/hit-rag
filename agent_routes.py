@@ -342,10 +342,12 @@ async def agent_react(request: AgentReactRequest):
 
     return StreamingResponse(
         event_stream(),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Content-Type-Options": "nosniff"
+            "X-Accel-Buffering": "no",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Transfer-Encoding": "chunked"
         }
     )

@@ -117,11 +117,11 @@ if __name__ == "__main__":
     print("📚 文档管理路由: /api/documents/*")
     print("💬 对话路由: /api/chat/*")
     print("🤖 Agent 路由: /api/agent/*")
-    print("📖 API 文档: http://localhost:8000/docs")
+    print("📖 API 文档: http://localhost:8086/docs")
 
     uvicorn.run(
         "api_server:app",
         host="0.0.0.0",
-        port=8000,
+        port=8086,
         reload=True
     )
