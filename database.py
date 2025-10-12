@@ -72,6 +72,13 @@ def init_database():
         with open(chat_schema_file, 'r', encoding='utf-8') as f:
             chat_schema_sql = f.read()
 
+    # 执行 RAG 配置表的 schema
+    rag_config_schema_file = Path(__file__).parent / ".dbs/rag_config_schema.sql"
+    rag_config_schema_sql = ""
+    if rag_config_schema_file.exists():
+        with open(rag_config_schema_file, 'r', encoding='utf-8') as f:
+            rag_config_schema_sql = f.read()
+
     with _DB_LOCK:
         with get_connection() as conn:
             # 执行文档表 schema
@@ -79,6 +86,9 @@ def init_database():
             # 执行对话表 schema（如果存在）
             if chat_schema_sql:
                 conn.executescript(chat_schema_sql)
+            # 执行 RAG 配置表 schema（如果存在）
+            if rag_config_schema_sql:
+                conn.executescript(rag_config_schema_sql)
 
     print(f"✅ Database initialized at: {DB_FILE}")
 
@@ -273,7 +283,7 @@ def get_chunks_by_document(document_id: int) -> List[Dict[str, Any]]:
             chunk = dict(row)
             chunk['content_tags'] = _json_load(chunk.get('content_tags'))
 
-            # 如果有编辑内容，使用编辑内容；否则使用原始内容
+            # ���果有编辑内容，使用编辑内容；否则使用原始内容
             # 但为了保持兼容性，我们在返回时保留 content 字段
             if not chunk.get('edited_content'):
                 chunk['edited_content'] = chunk['content']
@@ -990,6 +1000,256 @@ def merge_tags_in_all_chunks(source_tags: List[str], target_tag: str) -> Dict[st
         'affected_chunks': len(affected_chunks),
         'merged_count': len(source_tags)
     }
+
+
+# ============================================
+# RAG 配置管理
+# ============================================
+
+def get_rag_config(config_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    获取 RAG 配置
+
+    Args:
+        config_key: 可选的配置键，如果提供则只返回该配置项
+
+    Returns:
+        配置字典或配置项
+    """
+    with get_connection() as conn:
+        if config_key:
+            row = conn.execute(
+                "SELECT * FROM rag_config WHERE config_key = ?",
+                (config_key,)
+            ).fetchone()
+            return dict(row) if row else None
+        else:
+            rows = conn.execute(
+                "SELECT * FROM rag_config ORDER BY category, id"
+            ).fetchall()
+            return {row['config_key']: dict(row) for row in rows}
+
+
+def update_rag_config(config_key: str, config_value: float) -> bool:
+    """
+    更新 RAG 配置项
+
+    Args:
+        config_key: 配置键
+        config_value: 配置值
+
+    Returns:
+        是否更新成功
+    """
+    with _DB_LOCK:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE rag_config
+                SET config_value = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE config_key = ?
+                """,
+                (config_value, config_key)
+            )
+            return cursor.rowcount > 0
+
+
+def batch_update_rag_config(configs: Dict[str, float]) -> int:
+    """
+    批量更新 RAG 配置
+
+    Args:
+        configs: 配置字典 {config_key: config_value}
+
+    Returns:
+        更新的配置项数量
+    """
+    updated_count = 0
+    with _DB_LOCK:
+        with get_connection() as conn:
+            for config_key, config_value in configs.items():
+                cursor = conn.execute(
+                    """
+                    UPDATE rag_config
+                    SET config_value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE config_key = ?
+                    """,
+                    (config_value, config_key)
+                )
+                if cursor.rowcount > 0:
+                    updated_count += 1
+    return updated_count
+
+
+def init_rag_config_from_env():
+    """
+    从环境变量初始化 RAG 配置（如果表为空）
+    """
+    # 检查配置表是否为空
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) as cnt FROM rag_config").fetchone()['cnt']
+        if count > 0:
+            print("ℹ️  RAG 配置已存在，跳过初始化")
+            return
+
+    # 定义默认配置（从环境变量读取）
+    default_configs = [
+        # 对话配置
+        {
+            'config_key': 'ENABLE_CHAT_MODE',
+            'config_value': float(os.getenv('ENABLE_CHAT_MODE', 'true').lower() == 'true'),
+            'description': '是否启用闲聊模式',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 1.0,
+            'category': 'chat'
+        },
+        {
+            'config_key': 'CHAT_MODE_THRESHOLD',
+            'config_value': float(os.getenv('CHAT_MODE_THRESHOLD', '0.7')),
+            'description': '闲聊模式阈值（0.0-1.0，超过此值判定为闲聊）',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.7,
+            'category': 'chat'
+        },
+
+        # 置信度阈值
+        {
+            'config_key': 'RAG_CONFIDENCE_THRESHOLD',
+            'config_value': float(os.getenv('RAG_CONFIDENCE_THRESHOLD', '0.47')),
+            'description': '置信度阈值：用于判断检索结果是否可信（0.0-1.0）',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.5,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_RERANK_SCORE_THRESHOLD',
+            'config_value': float(os.getenv('RAG_RERANK_SCORE_THRESHOLD', '0.16')),
+            'description': 'Rerank 分数阈值（0.0-1.0，越大越严格）',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.2,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_L2_DISTANCE_THRESHOLD',
+            'config_value': float(os.getenv('RAG_L2_DISTANCE_THRESHOLD', '1.2')),
+            'description': 'L2 距离阈值（越小越相关）',
+            'min_value': 0.0,
+            'max_value': 5.0,
+            'default_value': 1.2,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_RERANK_GOOD_THRESHOLD',
+            'config_value': float(os.getenv('RAG_RERANK_GOOD_THRESHOLD', '0.18')),
+            'description': 'Rerank 良好分数阈值',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.2,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_RERANK_EXCELLENT_THRESHOLD',
+            'config_value': float(os.getenv('RAG_RERANK_EXCELLENT_THRESHOLD', '0.3')),
+            'description': 'Rerank 优秀分数阈值',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.3,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_L2_GOOD_THRESHOLD',
+            'config_value': float(os.getenv('RAG_L2_GOOD_THRESHOLD', '1.2')),
+            'description': 'L2 距离良好阈值',
+            'min_value': 0.0,
+            'max_value': 5.0,
+            'default_value': 1.2,
+            'category': 'threshold'
+        },
+        {
+            'config_key': 'RAG_L2_EXCELLENT_THRESHOLD',
+            'config_value': float(os.getenv('RAG_L2_EXCELLENT_THRESHOLD', '1.0')),
+            'description': 'L2 距离优秀阈值',
+            'min_value': 0.0,
+            'max_value': 5.0,
+            'default_value': 1.0,
+            'category': 'threshold'
+        },
+
+        # 检索数量配置
+        {
+            'config_key': 'RAG_ENTITY_TOP_K',
+            'config_value': float(os.getenv('RAG_ENTITY_TOP_K', '5')),
+            'description': '单实体检索数量',
+            'min_value': 1.0,
+            'max_value': 50.0,
+            'default_value': 3.0,
+            'category': 'retrieval'
+        },
+        {
+            'config_key': 'RAG_MULTI_ENTITY_DEDUP_LIMIT',
+            'config_value': float(os.getenv('RAG_MULTI_ENTITY_DEDUP_LIMIT', '20')),
+            'description': '多实体检索后去重数量',
+            'min_value': 1.0,
+            'max_value': 100.0,
+            'default_value': 15.0,
+            'category': 'retrieval'
+        },
+        {
+            'config_key': 'RAG_RERANK_TOP_N',
+            'config_value': float(os.getenv('RAG_RERANK_TOP_N', '8')),
+            'description': '重排序后保留数量',
+            'min_value': 1.0,
+            'max_value': 50.0,
+            'default_value': 8.0,
+            'category': 'retrieval'
+        },
+        {
+            'config_key': 'RAG_SINGLE_QUERY_TOP_K',
+            'config_value': float(os.getenv('RAG_SINGLE_QUERY_TOP_K', '8')),
+            'description': '单查询检索数量',
+            'min_value': 1.0,
+            'max_value': 50.0,
+            'default_value': 8.0,
+            'category': 'retrieval'
+        },
+        {
+            'config_key': 'RAG_FILES_DISPLAY_LIMIT',
+            'config_value': float(os.getenv('RAG_FILES_DISPLAY_LIMIT', '5')),
+            'description': '文件源显示数量',
+            'min_value': 1.0,
+            'max_value': 20.0,
+            'default_value': 5.0,
+            'category': 'retrieval'
+        },
+    ]
+
+    # 批量插入配置
+    with _DB_LOCK:
+        with get_connection() as conn:
+            for config in default_configs:
+                conn.execute(
+                    """
+                    INSERT INTO rag_config (
+                        config_key, config_value, description,
+                        min_value, max_value, default_value, category
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        config['config_key'],
+                        config['config_value'],
+                        config['description'],
+                        config['min_value'],
+                        config['max_value'],
+                        config['default_value'],
+                        config['category']
+                    )
+                )
+
+    print(f"✅ 已初始化 {len(default_configs)} 个 RAG 配置项")
 
 
 if __name__ == '__main__':

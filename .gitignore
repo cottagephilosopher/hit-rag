@@ -231,3 +231,4 @@ STREAM_TEST_GUIDE.md
 test_chunk_navigation.py
 .gitignore
 USER_MANUAL.md
+SETUP.md

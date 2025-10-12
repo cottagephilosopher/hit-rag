@@ -19,6 +19,7 @@ from database import init_database
 from chat_routes import router as chat_router
 from document_routes import router as document_router
 from agent_routes import router as agent_router
+from config_routes import router as config_router
 
 # 创建 FastAPI 应用
 app = FastAPI(title="RAG Preprocessor API", version="2.0.0")
@@ -36,6 +37,7 @@ app.add_middleware(
 app.include_router(chat_router, tags=["Chat"])
 app.include_router(document_router, tags=["Documents & Chunks"])
 app.include_router(agent_router, tags=["Agent"])
+app.include_router(config_router, tags=["Config"])
 
 
 @app.get("/")

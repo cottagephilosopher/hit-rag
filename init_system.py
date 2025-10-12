@@ -56,6 +56,7 @@ def init_sqlite_database(force: bool = False):
     # 读取 schema 文件
     schema_file = db_dir / "schema.sql"
     chat_schema_file = db_dir / "chat_schema.sql"
+    rag_config_schema_file = db_dir / "rag_config_schema.sql"
 
     if not schema_file.exists():
         print(f"  ❌ Schema 文件不存在: {schema_file}")
@@ -79,7 +80,24 @@ def init_sqlite_database(force: bool = False):
                 chat_schema_sql = f.read()
             cursor.executescript(chat_schema_sql)
 
+        # 执行 RAG 配置 schema（如果存在）
+        if rag_config_schema_file.exists():
+            print_step("创建 RAG 配置表", "")
+            with open(rag_config_schema_file, 'r', encoding='utf-8') as f:
+                rag_config_schema_sql = f.read()
+            cursor.executescript(rag_config_schema_sql)
+
         conn.commit()
+        conn.close()
+
+        # 初始化 RAG 配置数据
+        print_step("初始化 RAG 配置", "")
+        from database import init_rag_config_from_env
+        init_rag_config_from_env()
+
+        # 重新连接以验证
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
 
         # 验证表是否创建成功
         cursor.execute("""

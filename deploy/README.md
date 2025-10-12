@@ -22,7 +22,7 @@
 在项目根目录创建 `.env` 文件：
 
 ```bash
-cd /Users/idw/rags/hit-rag
+cd rags/hit-rag
 cp env.template .env
 ```
 
@@ -117,7 +117,7 @@ docker compose down -v
 ```bash
 # 路径配置
 ALL_MD_DIR=/path/to/your/markdown/files
-OUTPUT_DIR=/Users/idw/rags/hit-rag/output
+OUTPUT_DIR=~/rags/hit-rag/output
 
 # LLM 配置
 LLM_PROVIDER=azure
