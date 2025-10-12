@@ -29,16 +29,26 @@ class AgentReactRequest(BaseModel):
 @router.get("/api/assistants")
 async def get_assistants():
     """获取助手列表"""
-    return [
+    assistants = [
         {
             "id": "rag-assistant",
-            "name": "RAG 文档助手",
+            "name": "RAG知识助手",
             "description": "基于文档的智能问答助手",
             "model": "dspy-rag",
             "capabilities": ["document_qa", "semantic_search", "clarification"],
-            "status": "active"
+            "status": "1",  # 1 表示激活状态
+            "use-type": ["knowledge", "base", "semantic_search"]
         }
     ]
+
+    return {
+        "success": True,
+        "data": {
+            "assistants": assistants,
+            "active": assistants[0]  # 默认第一个为活跃助手
+        },
+        "message": "获取助手信息成功"
+    }
 
 
 @router.get("/api/agent/tools")
