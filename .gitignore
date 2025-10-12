@@ -2,10 +2,11 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+deploy/uv
+SETUP.md
 # C extensions
 *.so
-
+.dbs/*.db
 # Distribution / packaging
 .Python
 build/
@@ -222,3 +223,4 @@ backups/
 
 # Deployment temp files
 .env.bak
+SETUP.md

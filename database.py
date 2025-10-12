@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 
 # 数据库文件路径
-DB_FILE = Path(__file__).parent / "rag_preprocessor.db"
+DB_FILE = Path(__file__).parent / ".dbs/rag_preprocessor.db"
 
 # 数据库锁（用于并发控制）
 _DB_LOCK = threading.Lock()
@@ -52,17 +52,28 @@ def get_connection():
 
 def init_database():
     """初始化数据库（创建表和索引）"""
-    schema_file = Path(__file__).parent / "schema.sql"
-
+    # 执行文档相关表的 schema
+    schema_file = Path(__file__).parent / ".dbs/schema.sql"
     if not schema_file.exists():
         raise FileNotFoundError(f"Schema file not found: {schema_file}")
 
     with open(schema_file, 'r', encoding='utf-8') as f:
         schema_sql = f.read()
 
+    # 执行对话相关表的 schema
+    chat_schema_file = Path(__file__).parent / ".dbs/chat_schema.sql"
+    chat_schema_sql = ""
+    if chat_schema_file.exists():
+        with open(chat_schema_file, 'r', encoding='utf-8') as f:
+            chat_schema_sql = f.read()
+
     with _DB_LOCK:
         with get_connection() as conn:
+            # 执行文档表 schema
             conn.executescript(schema_sql)
+            # 执行对话表 schema（如果存在）
+            if chat_schema_sql:
+                conn.executescript(chat_schema_sql)
 
     print(f"✅ Database initialized at: {DB_FILE}")
 

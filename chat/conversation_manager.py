@@ -22,7 +22,7 @@ class ConversationManager:
             db_path: 数据库路径，默认使用项目根目录下的 rag_preprocessor.db
         """
         if db_path is None:
-            db_path = Path(__file__).parent.parent / "rag_preprocessor.db"
+            db_path = Path(__file__).parent.parent / ".dbs/rag_preprocessor.db"
         self.db_path = str(db_path)
 
     def _get_connection(self):

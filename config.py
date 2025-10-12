@@ -143,7 +143,7 @@ class LogConfig:
     """日志记录配置"""
 
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # DEBUG, INFO, WARNING, ERROR
-    LOG_FILE = os.getenv("LOG_FILE", "rag_preprocessor.log")
+    LOG_FILE = os.getenv("LOG_FILE", "logs/rag_preprocessor.log")
     LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
     # 详细日志记录选项

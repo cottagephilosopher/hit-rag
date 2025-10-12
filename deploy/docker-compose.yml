@@ -1,15 +1,18 @@
 version: '3.8'
 
 services:
-  # Milvus 向量数据库（独立模式）
+  # Milvus 向量数据库
   milvus:
-    image: milvusdb/milvus:v2.3.3
+    image: docker.m.daocloud.io/milvusdb/milvus:v2.6.2
     container_name: hit-rag-milvus
+    command: milvus run standalone
     environment:
       ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
       COMMON_STORAGETYPE: local
+      DEPLOY_MODE: STANDALONE
     volumes:
-      - ../volumes/milvus:/var/lib/milvus
+      - ~/docker_file/milvus:/var/lib/milvus
     ports:
       - "19530:19530"
       - "9091:9091"
@@ -20,6 +23,8 @@ services:
       retries: 3
       start_period: 90s
     restart: unless-stopped
+    networks:
+      - rag-network
 
   # 后端 API 服务
   backend:
@@ -30,67 +35,38 @@ services:
     environment:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
+      # 覆盖容器内的路径配置，指向容器内的实际映射路径
+      - ALL_MD_DIR=/app/all-md
+      - OUTPUT_DIR=/app/output
     env_file:
       - ../.env
     volumes:
-      - ../:/app
-      - ../all-md:/app/all-md
-      - ../volumes/output:/app/output
-      - ../volumes/db:/app/db
+      # 映射 .env 配置文件
+      - ../.env:/app/.env:ro
+      # 映射文档目录（根据 .env 中的 ALL_MD_DIR 配置，这里使用相对路径示例）
+      - ../../all-md:/app/all-md:rw
+      # 映射日志目录
+      - ../../logs:/app/logs
+      # 映射数据库文件
+      - ../.dbs:/app/.dbs
+      # 映射输出目录
+      - ../../output:/app/output
     ports:
-      - "8000:8000"
+      - "8086:8086"
     depends_on:
       milvus:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/assistants"]
+      test: ["CMD", "curl", "-f", "http://localhost:8086/api/assistants"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
     restart: unless-stopped
     command: ["uv", "run", "python", "api_server.py"]
-
-  # 前端 UI 服务
-  frontend:
-    build:
-      context: ../hit-rag-ui
-      dockerfile: Dockerfile
-    container_name: hit-rag-frontend
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000
-    volumes:
-      - ../hit-rag-ui:/app
-      - /app/node_modules
-    ports:
-      - "5173:5173"
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
-
-  # versa-chat-view 聊天界面
-  chat-view:
-    build:
-      context: ../versa-chat-view
-      dockerfile: Dockerfile
-    container_name: hit-rag-chat-view
-    environment:
-      - RAG_API_BASE=http://localhost:8000
-      - NEXT_PUBLIC_WELCOME_TITLE=RAG 智能问答助手
-      - NEXT_PUBLIC_WELCOME_MESSAGE=询问关于您文档的任何问题
-    volumes:
-      - ../versa-chat-view:/app
-      - /app/node_modules
-      - /app/.next
-    ports:
-      - "3000:3000"
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - rag-network
 
 networks:
-  default:
-    name: hit-rag-network
+  rag-network:
+    driver: bridge

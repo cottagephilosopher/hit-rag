@@ -104,6 +104,8 @@ class RAGVectorStore:
 
         documents = []
         content_hashes = []
+        seen_hashes = set()  # 用于检测重复的 content_hash
+
         for chunk in chunks:
             try:
                 # 优先使用 edited_content，如果不存在则使用 content
@@ -117,6 +119,13 @@ class RAGVectorStore:
 
                 # 计算内容 hash 作为确定性 ID
                 content_hash = self._compute_content_hash(content, user_tag)
+
+                # 跳过重复的 content_hash（同一批次中）
+                if content_hash in seen_hashes:
+                    logger.warning(f"⚠️  Skipping duplicate content_hash in batch: {content_hash} for chunk {chunk.get('id')}")
+                    continue
+
+                seen_hashes.add(content_hash)
                 content_hashes.append(content_hash)
 
                 # 构建元数据

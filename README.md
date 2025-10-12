@@ -182,7 +182,7 @@ npm run dev
 ```bash
 cd ./hit-rag
 uv run api_server.py
-# API 服务运行在 http://localhost:8000
+# API 服务运行在 http://localhost:8086
 ```
 
 **启动前端界面**：
@@ -194,7 +194,7 @@ npm run dev
 
 ### API 接口
 
-访问 `http://localhost:8000/docs` 查看完整的 API 文档（Swagger UI）。
+访问 `http://localhost:8086/docs` 查看完整的 API 文档（Swagger UI）。
 
 **核心接口**：
 
@@ -446,7 +446,7 @@ uv run -m vector_db.vectorization_manager
 
 2. **Token 映射失败**
    - 检查 tiktoken 版本：`pip show tiktoken`（应为 0.5.2）
-   - 查看日志：`tail -f rag_preprocessor.log`
+   - 查看日志：`tail -f logs/rag_preprocessor.log`
 
 3. **LLM API 调用失败**
    - 检查 API Key 是否有效

@@ -10,7 +10,7 @@ def migrate_chat_tables():
     """添加对话系统所需的表"""
 
     # 数据库路径
-    db_path = Path(__file__).parent / "rag_preprocessor.db"
+    db_path = Path(__file__).parent / ".dbs/rag_preprocessor.db"
 
     print(f"📊 连接数据库: {db_path}")
 
