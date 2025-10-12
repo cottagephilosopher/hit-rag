@@ -662,6 +662,120 @@ async def create_tag(request: TagCreateRequest):
         raise HTTPException(status_code=500, detail=f"创建标签失败: {str(e)}")
 
 
+# ==================== 文档和切块导航 API ====================
+
+@router.get("/api/view/document/{filename}/chunk/{chunk_db_id}")
+async def view_document_chunk(filename: str, chunk_db_id: int):
+    """
+    文档切块导航接口
+    用于从外部链接跳转到文档并定位到特定切块
+
+    参数：
+        filename: 文档文件名
+        chunk_db_id: 切块的数据库主键ID（全局唯一）
+
+    返回：HTTP 302 重定向到前端文档界面
+    """
+    from fastapi.responses import RedirectResponse
+    from urllib.parse import quote
+
+    try:
+        # 验证文档是否存在
+        doc_info = await get_document_status(filename)
+        if not doc_info or doc_info.status != 'processed':
+            raise HTTPException(
+                status_code=404,
+                detail=f"文档 {filename} 不存在或未处理"
+            )
+
+        # 通过数据库主键ID查询切块
+        chunk = get_chunk(chunk_db_id)
+
+        if not chunk:
+            raise HTTPException(
+                status_code=404,
+                detail=f"切块 ID {chunk_db_id} 不存在"
+            )
+
+        # 验证切块是否属于该文档
+        if chunk.get('source_file') != filename:
+            raise HTTPException(
+                status_code=400,
+                detail=f"切块 {chunk_db_id} 不属于文档 {filename}"
+            )
+
+        # 构造前端重定向URL（指向 hit-rag-ui）
+        # 使用 chunk_db_id 作为参数，并 URL 编码文件名
+        frontend_url = os.getenv("FRONTEND_UI_URL", "http://localhost:5173")
+        encoded_filename = quote(filename)
+        redirect_url = f"{frontend_url}/?doc={encoded_filename}&chunk={chunk_db_id}"
+
+        # 返回 HTTP 302 重定向
+        return RedirectResponse(
+            url=redirect_url,
+            status_code=302
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"处理请求失败: {str(e)}"
+        )
+
+
+@router.get("/api/chunk/{chunk_db_id}")
+async def get_chunk_info(chunk_db_id: int):
+    """
+    获取切块详细信息
+    用于获取单个切块的完整内容和元数据
+
+    参数：
+        chunk_db_id: 切块的数据库主键ID
+    """
+    try:
+        chunk = get_chunk(chunk_db_id)
+
+        if not chunk:
+            raise HTTPException(
+                status_code=404,
+                detail=f"切块 ID {chunk_db_id} 不存在"
+            )
+
+        # 获取文档信息
+        doc_info = get_document_by_filename(chunk['source_file'])
+
+        return {
+            "success": True,
+            "chunk": {
+                "id": chunk.get('id'),  # 数据库主键ID
+                "chunk_sequence": chunk.get('chunk_id'),  # 文档内顺序编号
+                "content": chunk.get('content'),
+                "edited_content": chunk.get('edited_content'),
+                "source_file": chunk.get('source_file'),
+                "token_start": chunk.get('token_start'),
+                "token_end": chunk.get('token_end'),
+                "status": chunk.get('status'),
+                "content_tags": chunk.get('content_tags', []),
+                "user_tag": chunk.get('user_tag'),
+                "token_count": chunk.get('token_count')
+            },
+            "document": {
+                "filename": doc_info.get('filename') if doc_info else chunk.get('source_file'),
+                "status": doc_info.get('status') if doc_info else 'unknown'
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取切块信息失败: {str(e)}"
+        )
+
+
 # ==================== 向量化 API ====================
 
 @router.post("/api/chunks/vectorize/batch", response_model=VectorizeResponse)

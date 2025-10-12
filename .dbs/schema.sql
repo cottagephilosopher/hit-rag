@@ -145,26 +145,7 @@ BEGIN
 END;
 
 -- ============================================
--- 6. 示例数据（用于测试）
+-- 6. 初始化说明
 -- ============================================
-
--- 插入示例文档
-INSERT OR IGNORE INTO documents (id, filename, source_path, status, total_chunks, total_tokens, processed_at)
-VALUES (1, 'example.md', '/all-md/example.md', 'completed', 3, 1234, CURRENT_TIMESTAMP);
-
--- 插入示例切片
-INSERT OR IGNORE INTO document_chunks (
-    id, document_id, chunk_id, content, token_start, token_end, token_count,
-    user_tag, content_tags, status, version
-) VALUES
-(1, 1, 1, '# 产品说明\n\n这是产品的介绍内容...', 0, 100, 100, '产品说明', '["产品", "介绍"]', 0, 1),
-(2, 1, 2, '## 技术参数\n\n分辨率: 1920x1080', 100, 200, 100, '技术参数', '["参数", "规格"]', 0, 1),
-(3, 1, 3, '## 使用说明\n\n详细的使用步骤...', 200, 300, 100, '使用说明', '["说明", "教程"]', 0, 1);
-
--- 插入示例日志
-INSERT OR IGNORE INTO document_logs (
-    document_id, chunk_id, action, message, user_id, payload
-) VALUES
-(1, 1, 'create', '创建了chunk', 'system', '{"initial_version": 1}'),
-(1, 2, 'create', '创建了chunk', 'system', '{"initial_version": 1}'),
-(1, 3, 'create', '创建了chunk', 'system', '{"initial_version": 1}');
+-- 使用 init_system.py 脚本初始化数据库
+-- 该脚本会自动创建所有表结构并验证连接

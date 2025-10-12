@@ -6,13 +6,18 @@
 import sqlite3
 import json
 import threading
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # 数据库文件路径
-DB_FILE = Path(__file__).parent / ".dbs/rag_preprocessor.db"
+DB_FILE = Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
 
 # 数据库锁（用于并发控制）
 _DB_LOCK = threading.Lock()
@@ -218,6 +223,27 @@ def get_chunk(chunk_id: int) -> Optional[Dict[str, Any]]:
             FROM document_chunks c
             LEFT JOIN documents d ON c.document_id = d.id
             WHERE c.id = ?
+            """,
+            (chunk_id,)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        chunk = dict(row)
+        chunk['content_tags'] = _json_load(chunk.get('content_tags'))
+        return chunk
+
+
+def get_chunk_by_chunk_id(chunk_id: str) -> Optional[Dict[str, Any]]:
+    """根据 chunk_id（字符串格式）获取 chunk"""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT c.*, d.filename as source_file
+            FROM document_chunks c
+            LEFT JOIN documents d ON c.document_id = d.id
+            WHERE c.chunk_id = ?
             """,
             (chunk_id,)
         ).fetchone()

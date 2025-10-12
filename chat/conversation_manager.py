@@ -6,9 +6,14 @@
 import sqlite3
 import uuid
 import json
+import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 
 class ConversationManager:
@@ -19,10 +24,10 @@ class ConversationManager:
         初始化对话管理器
 
         Args:
-            db_path: 数据库路径，默认使用项目根目录下的 rag_preprocessor.db
+            db_path: 数据库路径，默认从 .env 的 DB_FILE 获取
         """
         if db_path is None:
-            db_path = Path(__file__).parent.parent / ".dbs/rag_preprocessor.db"
+            db_path = Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
         self.db_path = str(db_path)
 
     def _get_connection(self):

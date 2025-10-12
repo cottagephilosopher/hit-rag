@@ -5,11 +5,13 @@ Agent 对话路由
 
 import json
 import asyncio
+import os
 from typing import List, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from loguru import logger
+from urllib.parse import quote
 
 router = APIRouter()
 
@@ -195,11 +197,27 @@ async def agent_react(request: AgentReactRequest):
                 await asyncio.sleep(0.05)
 
                 # 发送文件源信息（使用 files 类型）
+                api_base_url = os.getenv("API_BASE_URL", "http://localhost:8086")
+
                 for i, source in enumerate(sources[:5]):  # 最多显示5个来源
                     doc_name = source.get('document', f'文档{i+1}')
-                    # 构造文件路径（如果有的话）
-                    file_path = source.get('file_path', f'/docs/{doc_name}')
-                    files_content = {"fileName": doc_name, "filePath": file_path}
+                    chunk_db_id = source.get('chunk_db_id', '')  # 使用数据库主键ID
+
+                    # 构造API导航URL（指向后端API，由后端重定向到前端）
+                    if chunk_db_id and doc_name:
+                        # URL编码文档名以处理特殊字符
+                        encoded_doc_name = quote(doc_name)
+                        file_url = f"{api_base_url}/api/view/document/{encoded_doc_name}/chunk/{chunk_db_id}"
+                    else:
+                        # 降级：没有chunk_db_id时使用传统路径
+                        file_url = source.get('file_path', f'/docs/{doc_name}')
+
+                    files_content = {
+                        "fileName": doc_name,
+                        "filePath": file_url,
+                        "chunkDbId": chunk_db_id,  # 传递数据库主键ID
+                        "sourceFile": doc_name  # 传递源文件名
+                    }
                     yield f'data: {json.dumps({"type": "files", "content": files_content})}\n\n'
                     await asyncio.sleep(0.05)
 

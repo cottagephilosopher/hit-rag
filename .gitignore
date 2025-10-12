@@ -224,3 +224,10 @@ backups/
 # Deployment temp files
 .env.bak
 SETUP.md
+QUICK_START.md
+RAG_THRESHOLD_CONFIG.md
+SETUP.md
+STREAM_TEST_GUIDE.md
+test_chunk_navigation.py
+.gitignore
+USER_MANUAL.md

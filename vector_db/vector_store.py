@@ -138,9 +138,9 @@ class RAGVectorStore:
                 merged_tags = list(dict.fromkeys(doc_tags + content_tags))
 
                 metadata = {
-                    'chunk_db_id': chunk['id'],
+                    'chunk_db_id': chunk['id'],  # 数据库主键ID（全局唯一）
                     'document_id': chunk.get('document_id', 0),
-                    'chunk_id': chunk.get('chunk_id', 0),
+                    'chunk_sequence': chunk.get('chunk_id', 0),  # 文档内顺序编号
                     'source_file': chunk.get('source_file', '') or 'unknown',
                     'user_tag': user_tag or 'none',
                     'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签

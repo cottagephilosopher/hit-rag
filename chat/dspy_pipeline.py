@@ -263,7 +263,8 @@ class DSPyRAGPipeline:
             for doc, score in results:
                 metadata = doc.metadata
                 chunks.append({
-                    "chunk_id": metadata.get("chunk_db_id") or metadata.get("pk"),
+                    "chunk_db_id": metadata.get("chunk_db_id") or metadata.get("pk"),  # 数据库主键ID
+                    "chunk_sequence": metadata.get("chunk_sequence", 0),  # 文档内顺序编号
                     "content": metadata.get("original_content") or doc.page_content,
                     "score": score,
                     "document": metadata.get("source_file", "Unknown"),
@@ -1237,18 +1238,35 @@ class DSPyRAGPipeline:
 
         # 发送文件源信息
         if not memory_fallback:
+            # 从环境变量获取 API 基础 URL
+            import os
+            from urllib.parse import quote
+            api_base_url = os.getenv("API_BASE_URL", "http://localhost:8086")
+
             for chunk in generation_chunks[:self.files_display_limit]:
                 metadata_type = chunk.get('metadata', {}).get('type')
                 if metadata_type in {"conversation_history", "conversation_memory"}:
                     continue
                 doc_name = chunk.get('document', 'Unknown')
-                file_path = chunk.get('metadata', {}).get('file_path', '')
+                chunk_db_id = chunk.get('chunk_db_id', '')  # 使用数据库主键ID
+
+                # 构造完整的 API 导航 URL
+                if chunk_db_id and doc_name and doc_name != 'Unknown':
+                    # URL 编码文档名以处理特殊字符
+                    encoded_doc_name = quote(doc_name)
+                    file_path = f"{api_base_url}/api/view/document/{encoded_doc_name}/chunk/{chunk_db_id}"
+                else:
+                    # 降级：使用传统格式
+                    file_path = chunk.get('metadata', {}).get('file_path', '') or f"#chunk-{chunk_db_id}"
+
                 if doc_name:
                     yield {
                         "type": "files",
                         "content": {
                             "fileName": doc_name,
-                            "filePath": file_path or f"#chunk-{chunk.get('chunk_id', '')}"
+                            "filePath": file_path,
+                            "chunkDbId": chunk_db_id,  # 传递数据库主键ID
+                            "sourceFile": doc_name  # 传递源文件名
                         }
                     }
                     await asyncio.sleep(0)

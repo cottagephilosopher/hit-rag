@@ -52,7 +52,9 @@ async def root():
                 "status": "GET /api/documents/{filename}/status",
                 "chunks": "GET /api/documents/{filename}/chunks",
                 "process": "POST /api/documents/{filename}/process",
-                "delete_output": "DELETE /api/documents/{filename}/output"
+                "delete_output": "DELETE /api/documents/{filename}/output",
+                "view_chunk": "GET /api/view/document/{filename}/chunk/{chunk_id}",
+                "chunk_info": "GET /api/chunk/{chunk_id}"
             },
             # 文档标签
             "document_tags": {

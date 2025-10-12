@@ -38,6 +38,8 @@ services:
       # 覆盖容器内的路径配置，指向容器内的实际映射路径
       - ALL_MD_DIR=/app/all-md
       - OUTPUT_DIR=/app/output
+      - LOG_FILE=/app/logs/rag_preprocessor.log
+      - DB_FILE=/app/.dbs/rag_preprocessor.db
     env_file:
       - ../.env
     volumes:
