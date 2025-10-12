@@ -165,8 +165,8 @@ def init_milvus_collection(force: bool = False):
             FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=embedding_dim),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name="chunk_db_id", dtype=DataType.INT64),  # 数据库主键 ID
-            FieldSchema(name="chunk_sequence", dtype=DataType.INT64),  # 文档内顺序编号
-            FieldSchema(name="source_file", dtype=DataType.VARCHAR, max_length=500),
+            FieldSchema(name="chunk_sequence", dtype=DataType.INT64, default_value=0),  # 文档内顺序编号
+            FieldSchema(name="source_file", dtype=DataType.VARCHAR, max_length=500, default_value="unknown"),
         ]
 
         # 创建集合 schema

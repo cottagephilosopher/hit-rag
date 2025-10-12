@@ -52,7 +52,7 @@ services:
       # 映射数据库文件
       - ../.dbs:/app/.dbs
       # 映射输出目录
-      - ../../output:/app/output
+      - ../../output:/app/output:rw
     ports:
       - "8086:8086"
     depends_on:
