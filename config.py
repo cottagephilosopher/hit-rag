@@ -21,6 +21,10 @@ class LLMConfig:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
 
+    # DashScope 配置（阿里云灵积）
+    DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
+    DASHSCOPE_MODEL = os.getenv("DASHSCOPE_MODEL", "qwen-max")
+
     # API 调用参数
     TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4000"))
@@ -296,6 +300,9 @@ def validate_config():
     elif LLMConfig.PROVIDER == "openai":
         if not LLMConfig.OPENAI_API_KEY:
             errors.append("未设置 OPENAI_API_KEY 环境变量")
+    elif LLMConfig.PROVIDER == "dashscope":
+        if not LLMConfig.DASHSCOPE_API_KEY:
+            errors.append("未设置 DASHSCOPE_API_KEY 环境变量")
     else:
         errors.append(f"不支持的 LLM_PROVIDER: {LLMConfig.PROVIDER}")
 

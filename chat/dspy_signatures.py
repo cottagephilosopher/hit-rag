@@ -36,6 +36,24 @@ class QueryRewrite(dspy.Signature):
     search_strategy = dspy.OutputField(desc="建议的搜索策略：exact_match | semantic | hybrid")
 
 
+class TagIdentification(dspy.Signature):
+    """
+    从用户查询中识别相关标签，用于精确筛选检索结果
+
+    业务上下文：
+    - 标签库包含文档主题标签（如"产品简介"、"安装指南"、"技术规格"）
+    - 用户可能明确或隐含地指定想查询的内容类型
+    - 目标：识别用户意图匹配的标签，提高检索精度
+    """
+
+    user_query = dspy.InputField(desc="用户查询")
+    available_tags = dspy.InputField(desc="系统可用标签列表（JSON格式）")
+
+    relevant_tags = dspy.OutputField(desc="相关标签列表（JSON格式），从available_tags中选择，如果没有相关标签返回空列表[]")
+    confidence = dspy.OutputField(desc="标签匹配置信度 0.0-1.0")
+    reasoning = dspy.OutputField(desc="为什么选择这些标签的理由")
+
+
 class ConfidenceEvaluation(dspy.Signature):
     """
     评估检索结果的充分性和二义性

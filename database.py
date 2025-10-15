@@ -1149,6 +1149,24 @@ def init_rag_config_from_env():
             'default_value': 0.7,
             'category': 'chat'
         },
+        {
+            'config_key': 'ENABLE_AUTO_TAG_FILTER',
+            'config_value': float(os.getenv('ENABLE_AUTO_TAG_FILTER', 'true').lower() == 'true'),
+            'description': '是否启用自动标签识别筛选',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 1.0,
+            'category': 'chat'
+        },
+        {
+            'config_key': 'AUTO_TAG_FILTER_THRESHOLD',
+            'config_value': float(os.getenv('AUTO_TAG_FILTER_THRESHOLD', '0.5')),
+            'description': '自动标签识别置信度阈值（0.0-1.0）',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.5,
+            'category': 'chat'
+        },
 
         # 置信度阈值
         {

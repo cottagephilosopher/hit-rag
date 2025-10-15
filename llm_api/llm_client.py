@@ -29,7 +29,7 @@ class LLMClient:
         初始化 LLM 客户端
 
         Args:
-            provider: 'azure' 或 'openai'，默认使用配置中的值
+            provider: 'azure'、'openai' 或 'dashscope'，默认使用配置中的值
         """
         self.provider = provider or LLMConfig.PROVIDER
         self.client = None
@@ -56,6 +56,16 @@ class LLMClient:
                 self.model_name = LLMConfig.OPENAI_MODEL
                 logger.info(
                     f"✅ OpenAI 客户端初始化成功: {self.model_name}"
+                )
+
+            elif self.provider == "dashscope":
+                self.client = OpenAI(
+                    api_key=LLMConfig.DASHSCOPE_API_KEY,
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                )
+                self.model_name = LLMConfig.DASHSCOPE_MODEL
+                logger.info(
+                    f"✅ DashScope 客户端初始化成功: {self.model_name}"
                 )
 
             else:

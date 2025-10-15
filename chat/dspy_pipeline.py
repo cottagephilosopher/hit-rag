@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 from .dspy_signatures import (
     IntentClassification,
     QueryRewrite,
+    TagIdentification,
     ConfidenceEvaluation,
     ClarificationGeneration,
     ResponseGeneration
@@ -47,6 +48,10 @@ class DSPyRAGPipeline:
         self.enable_chat_mode = os.getenv('ENABLE_CHAT_MODE', 'false').lower() == 'true'
         self.chat_mode_threshold = float(os.getenv('CHAT_MODE_THRESHOLD', '0.7'))
 
+        # 读取自动标签识别配置
+        self.enable_auto_tag_filter = os.getenv('ENABLE_AUTO_TAG_FILTER', 'true').lower() == 'true'
+        self.auto_tag_filter_threshold = float(os.getenv('AUTO_TAG_FILTER_THRESHOLD', '0.5'))
+
         # 读取 RAG Pipeline 阈值配置
         self.confidence_threshold = confidence_threshold or float(os.getenv('RAG_CONFIDENCE_THRESHOLD', '0.5'))
 
@@ -73,14 +78,20 @@ class DSPyRAGPipeline:
         # 初始化各个模块
         self.intent_classifier = dspy.ChainOfThought(IntentClassification)
         self.query_rewriter = dspy.ChainOfThought(QueryRewrite)
+        self.tag_identifier = dspy.ChainOfThought(TagIdentification)
         self.confidence_evaluator = dspy.ChainOfThought(ConfidenceEvaluation)
         self.clarification_generator = dspy.ChainOfThought(ClarificationGeneration)
         self.response_generator = dspy.ChainOfThought(ResponseGeneration)
         memory_window = int(os.getenv('CHAT_MEMORY_MAX_ITEMS', '3'))
         self.memory_cache = ConversationMemoryCache(max_items=memory_window)
 
+        # 缓存标签列表（避免每次查询都读数据库）
+        self._available_tags_cache = None
+        self._tags_cache_time = 0
+
         logger.info(f"✅ DSPy RAG Pipeline initialized with model: {llm_model}")
         logger.info(f"   闲聊模式: {'开启' if self.enable_chat_mode else '关闭'} (置信度阈值: {self.chat_mode_threshold})")
+        logger.info(f"   自动标签筛选: {'开启' if self.enable_auto_tag_filter else '关闭'} (置信度阈值: {self.auto_tag_filter_threshold})")
         logger.info(f"   置信度阈值: {self.confidence_threshold}")
         logger.info(f"   相关性阈值: Rerank={self.rerank_score_threshold}, L2={self.l2_distance_threshold}")
         logger.info(f"   检索数量: 单实体={self.entity_top_k}, 去重={self.multi_entity_dedup_limit}, 重排={self.rerank_top_n}")
@@ -135,11 +146,32 @@ class DSPyRAGPipeline:
                     max_tokens=2000
                 )
                 logger.info(f"✅ DSPy configured with Azure OpenAI: {azure_deployment}")
+
+            elif llm_provider == 'dashscope':
+                # DashScope 配置（阿里云灵积）
+                # 使用 OpenAI 兼容模式，通过 api_base 指定 DashScope 端点
+                dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+                dashscope_model = os.getenv('DASHSCOPE_MODEL', 'qwen-max')
+                dashscope_endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+                # 使用 openai/ 前缀 + api_base 来调用 OpenAI 兼容端点
+                model_name = f"openai/{dashscope_model}"
+
+                lm = dspy.LM(
+                    model=model_name,
+                    api_key=dashscope_key,
+                    api_base=dashscope_endpoint,
+                    temperature=temperature,
+                    max_tokens=2000
+                )
+                logger.info(f"✅ DSPy configured with DashScope (OpenAI-compatible): {dashscope_model}")
+
             else:
-                api_base = os.getenv('API_BASE')
-                api_key = os.getenv('API_KEY')
-                model = os.getenv('MODEL_NAME', 'gpt-4o')
                 # 标准 OpenAI 配置
+                api_base = os.getenv('API_BASE')
+                api_key = os.getenv('API_KEY') or os.getenv('OPENAI_API_KEY')
+                model = os.getenv('MODEL_NAME') or os.getenv('OPENAI_MODEL', 'gpt-4o')
+
                 lm = dspy.LM(model=model, api_base=api_base, api_key=api_key, temperature=temperature, max_tokens=2000)
                 logger.info(f"✅ DSPy configured with OpenAI: {model}")
 
@@ -226,6 +258,129 @@ class DSPyRAGPipeline:
                 "rewritten_query": user_query,
                 "key_entities": [],
                 "search_strategy": "semantic"
+            }
+
+    def _get_available_tags(self) -> List[str]:
+        """
+        获取系统可用标签列表（带缓存）
+        缓存5分钟，减少数据库查询
+        """
+        import time
+        current_time = time.time()
+
+        # 缓存5分钟
+        if self._available_tags_cache and (current_time - self._tags_cache_time) < 300:
+            return self._available_tags_cache
+
+        try:
+            # 从数据库获取标签
+            import sys
+            from pathlib import Path
+            sys.path.append(str(Path(__file__).parent.parent))
+            from database import get_connection
+
+            with get_connection() as conn:
+                # 获取 user_tags
+                user_tags = conn.execute("""
+                    SELECT DISTINCT user_tag FROM document_chunks
+                    WHERE user_tag IS NOT NULL AND user_tag != ''
+                """).fetchall()
+
+                # 获取 content_tags
+                content_tags_rows = conn.execute("""
+                    SELECT DISTINCT content_tags FROM document_chunks
+                    WHERE content_tags IS NOT NULL AND content_tags != '[]'
+                """).fetchall()
+
+                # 获取文档级标签
+                doc_tags = conn.execute("""
+                    SELECT DISTINCT tag_text FROM document_tags
+                """).fetchall()
+
+            tags = set()
+
+            # 处理 user_tags
+            for row in user_tags:
+                if row['user_tag']:
+                    tags.add(row['user_tag'].lstrip('@'))
+
+            # 处理 content_tags
+            for row in content_tags_rows:
+                try:
+                    tag_list = json.loads(row['content_tags'])
+                    if isinstance(tag_list, list):
+                        for tag in tag_list:
+                            clean_tag = tag.lstrip('@') if isinstance(tag, str) else tag
+                            if clean_tag:
+                                tags.add(clean_tag)
+                except:
+                    continue
+
+            # 处理文档级标签
+            for row in doc_tags:
+                if row['tag_text']:
+                    tags.add(row['tag_text'].strip().lstrip('@'))
+
+            tag_list = sorted(list(tags))
+            self._available_tags_cache = tag_list
+            self._tags_cache_time = current_time
+
+            logger.debug(f"Loaded {len(tag_list)} available tags")
+            return tag_list
+
+        except Exception as e:
+            logger.error(f"Failed to load tags: {e}")
+            return []
+
+    def identify_relevant_tags(self, user_query: str) -> Dict[str, Any]:
+        """
+        识别用户查询中的相关标签
+
+        Args:
+            user_query: 用户查询
+
+        Returns:
+            标签识别结果
+        """
+        try:
+            available_tags = self._get_available_tags()
+
+            if not available_tags:
+                logger.warning("No available tags found")
+                return {
+                    "relevant_tags": [],
+                    "confidence": 0.0,
+                    "reasoning": "系统标签库为空"
+                }
+
+            # 调用 DSPy 标签识别
+            tags_json = json.dumps(available_tags, ensure_ascii=False)
+
+            result = self.tag_identifier(
+                user_query=user_query,
+                available_tags=tags_json
+            )
+
+            # 解析 relevant_tags
+            try:
+                relevant_tags = json.loads(result.relevant_tags)
+                if not isinstance(relevant_tags, list):
+                    relevant_tags = []
+            except:
+                relevant_tags = []
+
+            return {
+                "relevant_tags": relevant_tags,
+                "confidence": float(result.confidence),
+                "reasoning": result.reasoning
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Tag identification failed: {e}")
+            return {
+                "relevant_tags": [],
+                "confidence": 0.0,
+                "reasoning": f"标签识别失败: {e}"
             }
 
     def retrieve_chunks(
@@ -654,11 +809,90 @@ class DSPyRAGPipeline:
             logger.info(f"  闲聊意图置信度不足 ({intent_result['confidence']:.2f} < {self.chat_mode_threshold})，继续检索知识库")
             intent_note = "检测到您的问题可能偏向闲聊，但我尝试在知识库中为您查找相关内容"
 
-        # 2. 查询改写
-        rewrite_result = self.rewrite_query(user_query, conversation_history)
-        logger.info(f"  --- Rewritten query: {rewrite_result}")
+        # 2. 并行执行：查询改写 + 标签识别（如果开启）
+        if self.enable_auto_tag_filter:
+            logger.info("  🔄 Parallel processing: Query rewrite + Tag identification...")
+        else:
+            logger.info("  🔄 Query rewrite...")
+
+        import concurrent.futures
+        import threading
+
+        rewrite_result = None
+        tag_result = None
+        rewrite_error = None
+        tag_error = None
+
+        def do_rewrite():
+            nonlocal rewrite_result, rewrite_error
+            try:
+                rewrite_result = self.rewrite_query(user_query, conversation_history)
+            except Exception as e:
+                rewrite_error = e
+
+        def do_tag_identification():
+            nonlocal tag_result, tag_error
+            try:
+                tag_result = self.identify_relevant_tags(user_query)
+            except Exception as e:
+                tag_error = e
+
+        # 根据配置决定是否并行执行标签识别
+        if self.enable_auto_tag_filter:
+            # 使用线程池并行执行
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_rewrite = executor.submit(do_rewrite)
+                future_tags = executor.submit(do_tag_identification)
+
+                # 等待两个任务完成
+                concurrent.futures.wait([future_rewrite, future_tags])
+        else:
+            # 只执行查询改写
+            do_rewrite()
+            tag_result = {
+                "relevant_tags": [],
+                "confidence": 0.0,
+                "reasoning": "自动标签识别已关闭"
+            }
+
+        # 处理查询改写结果
+        if rewrite_error:
+            logger.error(f"❌ Query rewrite failed: {rewrite_error}")
+            rewrite_result = {
+                "rewritten_query": user_query,
+                "key_entities": [],
+                "search_strategy": "semantic"
+            }
+
+        logger.info(f"  ✅ Rewritten query: {rewrite_result['rewritten_query'][:100]}...")
         optimized_query = rewrite_result['rewritten_query']
-        logger.info(f"  Rewritten query: {optimized_query[:100]}...")
+
+        # 处理标签识别结果（仅当开启自动标签识别时）
+        if self.enable_auto_tag_filter:
+            if tag_error:
+                logger.error(f"❌ Tag identification failed: {tag_error}")
+                tag_result = {
+                    "relevant_tags": [],
+                    "confidence": 0.0,
+                    "reasoning": f"标签识别失败: {tag_error}"
+                }
+
+            relevant_tags = tag_result.get('relevant_tags', [])
+            tag_confidence = tag_result.get('confidence', 0.0)
+
+            # 如果识别到标签且置信度足够，添加到 filters
+            if relevant_tags and tag_confidence >= self.auto_tag_filter_threshold:
+                logger.info(f"  🏷️  Identified tags: {relevant_tags} (confidence: {tag_confidence:.2f})")
+                if not filters:
+                    filters = {}
+                # 使用 content_tags 筛选（因为它会同时匹配 user_tag 和 content_tags）
+                filters['content_tags'] = relevant_tags
+            elif relevant_tags:
+                logger.info(f"  🏷️  Tags identified but low confidence: {relevant_tags} (confidence: {tag_confidence:.2f} < {self.auto_tag_filter_threshold}), not using for filtering")
+            else:
+                logger.info(f"  🏷️  No relevant tags identified")
+        else:
+            logger.debug("  🏷️  Auto tag filter is disabled")
 
         # 3. 向量检索 - 利用 key_entities 做混合检索
         key_entities = rewrite_result.get('key_entities', [])
