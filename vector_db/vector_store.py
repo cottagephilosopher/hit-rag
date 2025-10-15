@@ -12,6 +12,13 @@ from typing import List, Dict, Any, Optional
 from langchain_milvus import Milvus
 from langchain_core.documents import Document
 
+try:
+    from config import VectorConfig
+    from tokenizer.tokenizer_client import get_tokenizer
+except ImportError:
+    from ..config import VectorConfig
+    from ..tokenizer.tokenizer_client import get_tokenizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +62,7 @@ class RAGVectorStore:
             raise
 
     @staticmethod
-    def _compute_content_hash(content: str, user_tag: str = '') -> str:
+    def _compute_content_hash(content: str, user_tag: str = '', segment_idx: int = 0) -> str:
         """
         计算内容的 hash 值作为确定性 ID
 
@@ -65,13 +72,53 @@ class RAGVectorStore:
         Args:
             content: 原始文本内容
             user_tag: 用户标签（影响向量化）
+            segment_idx: 分段索引（当文本被分段时使用）
 
         Returns:
             64 位十六进制字符串
         """
-        # 组合 user_tag 和 content，因为它们共同决定向量化的文本
-        combined = f"{user_tag}||{content}"
+        # 组合 user_tag、content 和 segment_idx，因为它们共同决定向量化的文本
+        combined = f"{user_tag}||{content}||segment_{segment_idx}"
         return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _split_text_by_tokens(text: str, max_tokens: int = 8192, overlap_tokens: int = 100) -> List[str]:
+        """
+        按照 token 数量分割文本，用于处理超长文本
+
+        Args:
+            text: 输入文本
+            max_tokens: 每段最大 token 数（默认 8192）
+            overlap_tokens: 重叠 token 数（默认 100）
+
+        Returns:
+            分割后的文本段列表
+        """
+        tokenizer = get_tokenizer()
+        tokens = tokenizer.encode(text)
+
+        # 如果文本不超长，直接返回
+        if len(tokens) <= max_tokens:
+            return [text]
+
+        # 分段处理
+        segments = []
+        start = 0
+
+        while start < len(tokens):
+            end = min(start + max_tokens, len(tokens))
+            segment_tokens = tokens[start:end]
+            segment_text = tokenizer.decode(segment_tokens)
+            segments.append(segment_text)
+
+            # 如果已经到达末尾，退出
+            if end >= len(tokens):
+                break
+
+            # 下一段从当前位置减去重叠部分开始
+            start = end - overlap_tokens
+
+        return segments
 
     def add_chunks(self, chunks: List[Dict[str, Any]], document_tags: List[str] = None) -> List[str]:
         """
@@ -106,6 +153,9 @@ class RAGVectorStore:
         content_hashes = []
         seen_hashes = set()  # 用于检测重复的 content_hash
 
+        # 获取 embedding 最大 token 限制
+        max_embedding_tokens = VectorConfig.EMBEDDING_MAX_TOKENS
+
         for chunk in chunks:
             try:
                 # 优先使用 edited_content，如果不存在则使用 content
@@ -117,42 +167,7 @@ class RAGVectorStore:
                 # 获取 user_tag（用于 hash 计算和向量化）
                 user_tag = chunk.get('user_tag', '') or ''
 
-                # 计算内容 hash 作为确定性 ID
-                content_hash = self._compute_content_hash(content, user_tag)
-
-                # 跳过重复的 content_hash（同一批次中）
-                if content_hash in seen_hashes:
-                    logger.warning(f"⚠️  Skipping duplicate content_hash in batch: {content_hash} for chunk {chunk.get('id')}")
-                    continue
-
-                seen_hashes.add(content_hash)
-                content_hashes.append(content_hash)
-
-                # 构建元数据
-                # 注意: Milvus 要求所有字段都必须有值，None 会导致数据不一致错误
-
-                # 合并标签：document_tags + content_tags
-                content_tags = chunk.get('content_tags', []) or []
-                doc_tags = document_tags or []
-                # 合并并去重（保持顺序：document_tags 在前，这样共性标签优先显示）
-                merged_tags = list(dict.fromkeys(doc_tags + content_tags))
-
-                metadata = {
-                    'chunk_db_id': chunk['id'],  # 数据库主键ID（全局唯一）
-                    'document_id': chunk.get('document_id', 0),
-                    'chunk_sequence': chunk.get('chunk_id', 0),  # 文档内顺序编号
-                    'source_file': chunk.get('source_file', '') or 'unknown',
-                    'user_tag': user_tag or 'none',
-                    'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签
-                    'is_atomic': bool(chunk.get('is_atomic', False)),
-                    'atomic_type': chunk.get('atomic_type') or 'none',  # 重要: 不能为空字符串或 None
-                    'token_count': chunk.get('token_count', 0),
-                    'vectorized_at': int(time.time()),
-                    'original_content': content,
-                    'content_hash': content_hash,  # 保存 hash 值用于追踪
-                }
-
-                # 创建向量化文本：user_tag + content
+                # 构建向量化文本：user_tag + content
                 # user_tag 作为标题，应该有更高的权重，所以重复3次
                 if user_tag and user_tag != 'none':
                     # 将标题重复3次以提高其在向量中的权重
@@ -160,13 +175,120 @@ class RAGVectorStore:
                 else:
                     vectorize_text = content
 
-                # 创建 LangChain Document
-                doc = Document(
-                    page_content=vectorize_text,
-                    metadata=metadata
-                )
+                # 检查向量化文本的 token 数量，如果超过限制则分段
+                tokenizer = get_tokenizer()
+                token_count = tokenizer.count_tokens(vectorize_text)
 
-                documents.append(doc)
+                # 如果 token 数量超过限制，进行分段处理
+                if token_count > max_embedding_tokens:
+                    logger.warning(
+                        f"⚠️  Chunk {chunk.get('id')} exceeds embedding token limit "
+                        f"({token_count} > {max_embedding_tokens}), splitting into segments..."
+                    )
+
+                    # 分段处理（保留一些重叠以保持上下文连续性）
+                    segments = self._split_text_by_tokens(
+                        vectorize_text,
+                        max_tokens=max_embedding_tokens - 100,  # 留一些余量
+                        overlap_tokens=100
+                    )
+
+                    logger.info(f"✂️  Split chunk {chunk.get('id')} into {len(segments)} segments")
+
+                    # 为每个分段创建向量
+                    for segment_idx, segment_text in enumerate(segments):
+                        # 计算每个分段的 hash（包含分段索引）
+                        content_hash = self._compute_content_hash(content, user_tag, segment_idx)
+
+                        # 跳过重复的 content_hash（同一批次中）
+                        if content_hash in seen_hashes:
+                            logger.warning(
+                                f"⚠️  Skipping duplicate content_hash in batch: "
+                                f"{content_hash} for chunk {chunk.get('id')} segment {segment_idx}"
+                            )
+                            continue
+
+                        seen_hashes.add(content_hash)
+                        content_hashes.append(content_hash)
+
+                        # 构建元数据
+                        # 注意: Milvus 要求所有字段都必须有值，None 会导致数据不一致错误
+
+                        # 合并标签：document_tags + content_tags
+                        content_tags = chunk.get('content_tags', []) or []
+                        doc_tags = document_tags or []
+                        # 合并并去重（保持顺序：document_tags 在前，这样共性标签优先显示）
+                        merged_tags = list(dict.fromkeys(doc_tags + content_tags))
+
+                        metadata = {
+                            'chunk_db_id': chunk['id'],  # 数据库主键ID（全局唯一）
+                            'document_id': chunk.get('document_id', 0),
+                            'chunk_sequence': chunk.get('chunk_id', 0),  # 文档内顺序编号
+                            'source_file': chunk.get('source_file', '') or 'unknown',
+                            'user_tag': user_tag or 'none',
+                            'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签
+                            'is_atomic': bool(chunk.get('is_atomic', False)),
+                            'atomic_type': chunk.get('atomic_type') or 'none',  # 重要: 不能为空字符串或 None
+                            'token_count': chunk.get('token_count', 0),
+                            'vectorized_at': int(time.time()),
+                            'original_content': content,  # 所有分段都保存完整的原始内容
+                            'content_hash': content_hash,  # 保存 hash 值用于追踪
+                        }
+
+                        # 创建 LangChain Document
+                        doc = Document(
+                            page_content=segment_text,  # 使用分段文本进行向量化
+                            metadata=metadata
+                        )
+
+                        documents.append(doc)
+                else:
+                    # 文本长度在限制范围内，正常处理
+                    # 计算内容 hash 作为确定性 ID
+                    content_hash = self._compute_content_hash(content, user_tag, 0)
+
+                    # 跳过重复的 content_hash（同一批次中）
+                    if content_hash in seen_hashes:
+                        logger.warning(
+                            f"⚠️  Skipping duplicate content_hash in batch: "
+                            f"{content_hash} for chunk {chunk.get('id')}"
+                        )
+                        continue
+
+                    seen_hashes.add(content_hash)
+                    content_hashes.append(content_hash)
+
+                    # 构建元数据
+                    # 注意: Milvus 要求所有字段都必须有值，None 会导致数据不一致错误
+
+                    # 合并标签：document_tags + content_tags
+                    content_tags = chunk.get('content_tags', []) or []
+                    doc_tags = document_tags or []
+                    # 合并并去重（保持顺序：document_tags 在前，这样共性标签优先显示）
+                    merged_tags = list(dict.fromkeys(doc_tags + content_tags))
+
+                    metadata = {
+                        'chunk_db_id': chunk['id'],  # 数据库主键ID（全局唯一）
+                        'document_id': chunk.get('document_id', 0),
+                        'chunk_sequence': chunk.get('chunk_id', 0),  # 文档内顺序编号
+                        'source_file': chunk.get('source_file', '') or 'unknown',
+                        'user_tag': user_tag or 'none',
+                        'content_tags': json.dumps(merged_tags, ensure_ascii=False),  # 存储合并后的标签
+                        'is_atomic': bool(chunk.get('is_atomic', False)),
+                        'atomic_type': chunk.get('atomic_type') or 'none',  # 重要: 不能为空字符串或 None
+                        'token_count': chunk.get('token_count', 0),
+                        'vectorized_at': int(time.time()),
+                        'original_content': content,
+                        'content_hash': content_hash,  # 保存 hash 值用于追踪
+                    }
+
+                    # 创建 LangChain Document
+                    doc = Document(
+                        page_content=vectorize_text,
+                        metadata=metadata
+                    )
+
+                    documents.append(doc)
 
             except Exception as e:
                 logger.error(f"Failed to prepare chunk {chunk.get('id')}: {e}")

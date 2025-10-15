@@ -227,6 +227,9 @@ class VectorConfig:
     # Azure OpenAI 配置
     AZURE_EMBEDDING_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002")
 
+    # Embedding 最大 Token 限制（防止超长文本被截断）
+    EMBEDDING_MAX_TOKENS = int(os.getenv("EMBEDDING_MAX_TOKENS", "8192"))
+
     # Embedding 维度映射（根据模型自动选择）
     EMBEDDING_DIMENSIONS = {
         # Ollama 模型
