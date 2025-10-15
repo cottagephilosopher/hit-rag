@@ -165,8 +165,20 @@ def init_milvus_collection(force: bool = False):
             FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=embedding_dim),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name="chunk_db_id", dtype=DataType.INT64),  # 数据库主键 ID
+            FieldSchema(name="document_id", dtype=DataType.INT64, default_value=0),  # 文档 ID
             FieldSchema(name="chunk_sequence", dtype=DataType.INT64, default_value=0),  # 文档内顺序编号
             FieldSchema(name="source_file", dtype=DataType.VARCHAR, max_length=500, default_value="unknown"),
+            # 标签字段（重要：用于标签筛选）
+            FieldSchema(name="user_tag", dtype=DataType.VARCHAR, max_length=200, default_value="none"),
+            FieldSchema(name="content_tags", dtype=DataType.VARCHAR, max_length=2000, default_value="[]"),  # JSON 数组
+            # ATOMIC 相关字段
+            FieldSchema(name="is_atomic", dtype=DataType.BOOL, default_value=False),
+            FieldSchema(name="atomic_type", dtype=DataType.VARCHAR, max_length=50, default_value="none"),
+            # 其他元数据
+            FieldSchema(name="token_count", dtype=DataType.INT64, default_value=0),
+            FieldSchema(name="vectorized_at", dtype=DataType.INT64, default_value=0),
+            FieldSchema(name="original_content", dtype=DataType.VARCHAR, max_length=65535, default_value=""),
+            FieldSchema(name="content_hash", dtype=DataType.VARCHAR, max_length=64, default_value=""),
         ]
 
         # 创建集合 schema

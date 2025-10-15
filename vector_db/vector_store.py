@@ -353,7 +353,9 @@ class RAGVectorStore:
                 - {'is_atomic': False}  # 布尔值
                 - {'document_id': 1}    # 数字
                 - {'source_file': 'xx.md'}  # 字符串
-                - {'content_tags': ['tag1', 'tag2']}  # 数组（任意匹配）
+                - {'user_tag': 'tag1'}  # 单个用户标签（精确匹配）
+                - {'user_tag': ['tag1', 'tag2']}  # 多个用户标签（任意匹配）
+                - {'content_tags': ['tag1', 'tag2']}  # 内容标签数组（任意匹配）
 
         Returns:
             Milvus expr 字符串
@@ -364,15 +366,35 @@ class RAGVectorStore:
         conditions = []
 
         for key, value in filters.items():
-            if key == 'content_tags' and isinstance(value, list):
+            if key == 'user_tag':
+                # 用户标签过滤：支持单个标签或标签列表
+                # 注意：自动处理 @ 前缀，同时匹配带和不带 @ 的标签
+                if isinstance(value, list):
+                    # 多个user_tag，任意匹配（OR）
+                    user_tag_conditions = []
+                    for tag in value:
+                        # 去除 @ 前缀并同时匹配两种形式
+                        clean_tag = tag.lstrip('@') if isinstance(tag, str) else tag
+                        user_tag_conditions.append(f'(user_tag == "{clean_tag}" or user_tag == "@{clean_tag}")')
+                    if user_tag_conditions:
+                        conditions.append(f"({' or '.join(user_tag_conditions)})")
+                elif isinstance(value, str):
+                    # 单个user_tag精确匹配，同时匹配带和不带 @ 的形式
+                    clean_tag = value.lstrip('@')
+                    conditions.append(f'(user_tag == "{clean_tag}" or user_tag == "@{clean_tag}")')
+            elif key == 'content_tags' and isinstance(value, list):
                 # 标签数组过滤：content_tags 包含任意一个指定标签
                 # content_tags 存储为 JSON 字符串，需要用 array_contains_any
                 # 但 Milvus 不支持直接对 JSON 字符串数组操作
                 # 改为使用 LIKE 匹配（不够精确但可用）
+                # 注意：标签可能带 @ 前缀（人工标注），需要同时匹配带和不带 @ 的情况
                 tag_conditions = []
                 for tag in value:
-                    # 匹配 JSON 数组中的标签
-                    tag_conditions.append(f'content_tags like "%\\"{tag}\\"%"')
+                    # 去除用户输入的 @ 前缀（如果有）
+                    clean_tag = tag.lstrip('@') if isinstance(tag, str) else tag
+                    # 同时匹配带 @ 和不带 @ 的标签
+                    # 例如: "产品简介" 会匹配 "产品简介" 或 "@产品简介"
+                    tag_conditions.append(f'(content_tags like "%\\"{clean_tag}\\"%" or content_tags like "%\\"@{clean_tag}\\"%")')
                 if tag_conditions:
                     conditions.append(f"({' or '.join(tag_conditions)})")
             elif isinstance(value, str):

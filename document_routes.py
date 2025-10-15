@@ -134,6 +134,7 @@ class TagStatsResponse(BaseModel):
     type: str
     count: int
     chunk_ids: List[int]
+    document_count: int = 0  # 文档级标签关联的文档数量
 
 
 class TagDeleteRequest(BaseModel):
@@ -472,27 +473,37 @@ async def remove_document_tag_endpoint(filename: str, tag_text: str):
 
 @router.get("/api/chunks/tags")
 async def get_all_chunk_tags():
-    """获取所有 chunk 的标签"""
+    """获取所有标签（包括 chunk 标签和文档级标签）"""
     try:
         with get_connection() as conn:
+            # 收集 chunk 的 user_tag
             user_tags = conn.execute("""
                 SELECT DISTINCT user_tag
                 FROM document_chunks
                 WHERE user_tag IS NOT NULL AND user_tag != ''
             """).fetchall()
 
+            # 收集 chunk 的 content_tags
             content_tags_rows = conn.execute("""
                 SELECT DISTINCT content_tags
                 FROM document_chunks
                 WHERE content_tags IS NOT NULL AND content_tags != '[]'
             """).fetchall()
 
+            # 收集文档级标签
+            document_tags = conn.execute("""
+                SELECT DISTINCT tag_text
+                FROM document_tags
+            """).fetchall()
+
         all_tags = set()
 
+        # 处理 user_tags
         for row in user_tags:
             if row['user_tag']:
                 all_tags.add(row['user_tag'])
 
+        # 处理 content_tags
         for row in content_tags_rows:
             try:
                 tags = json.loads(row['content_tags'])
@@ -503,6 +514,11 @@ async def get_all_chunk_tags():
                             all_tags.add(clean_tag)
             except:
                 continue
+
+        # 处理文档级标签
+        for row in document_tags:
+            if row['tag_text']:
+                all_tags.add(row['tag_text'].strip())
 
         return {"tags": sorted(list(all_tags))}
 

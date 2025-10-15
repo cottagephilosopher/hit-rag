@@ -728,9 +728,10 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
     Returns:
         标签列表，每个标签包含：
         - name: 标签名称
-        - type: 标签类型 (user_tag | content_tag | both)
+        - type: 标签类型 (user_tag | content_tag | document_tag | multiple)
         - count: 使用次数（chunk 数量）
         - chunk_ids: 包含该标签的 chunk IDs
+        - document_count: 文档级标签关联的文档数量
     """
     with get_connection() as conn:
         # 收集所有 user_tag
@@ -748,6 +749,13 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
             WHERE content_tags IS NOT NULL AND content_tags != '[]'
         """).fetchall()
 
+        # 收集所有文档级标签
+        document_tag_rows = conn.execute("""
+            SELECT tag_text, COUNT(DISTINCT document_id) as doc_count
+            FROM document_tags
+            GROUP BY tag_text
+        """).fetchall()
+
     # 统计标签
     tag_stats = {}
 
@@ -759,7 +767,8 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
             'name': tag_name,
             'type': 'user_tag',
             'count': row['count'],
-            'chunk_ids': chunk_ids
+            'chunk_ids': chunk_ids,
+            'document_count': 0
         }
 
     # 处理 content_tags
@@ -776,7 +785,9 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
             if clean_tag in tag_stats:
                 # 标签已存在（可能来自 user_tag）
                 if tag_stats[clean_tag]['type'] == 'user_tag':
-                    tag_stats[clean_tag]['type'] = 'both'
+                    tag_stats[clean_tag]['type'] = 'multiple'
+                elif tag_stats[clean_tag]['type'] == 'content_tag':
+                    pass  # 保持为 content_tag
                 tag_stats[clean_tag]['count'] += 1
                 if chunk_id not in tag_stats[clean_tag]['chunk_ids']:
                     tag_stats[clean_tag]['chunk_ids'].append(chunk_id)
@@ -785,11 +796,36 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
                     'name': clean_tag,
                     'type': 'content_tag',
                     'count': 1,
-                    'chunk_ids': [chunk_id]
+                    'chunk_ids': [chunk_id],
+                    'document_count': 0
                 }
 
-    # 返回排序后的列表（按使用次数降序）
-    return sorted(tag_stats.values(), key=lambda x: x['count'], reverse=True)
+    # 处理文档级标签
+    for row in document_tag_rows:
+        tag_name = row['tag_text'].strip()
+        doc_count = row['doc_count']
+
+        if tag_name in tag_stats:
+            # 标签已存在于 chunk 标签中
+            tag_stats[tag_name]['document_count'] = doc_count
+            if tag_stats[tag_name]['type'] in ['user_tag', 'content_tag']:
+                tag_stats[tag_name]['type'] = 'multiple'
+        else:
+            # 纯文档级标签
+            tag_stats[tag_name] = {
+                'name': tag_name,
+                'type': 'document_tag',
+                'count': 0,  # chunk 数量为 0
+                'chunk_ids': [],
+                'document_count': doc_count
+            }
+
+    # 返回排序后的列表（按使用次数降序，文档级标签按文档数量排序）
+    return sorted(
+        tag_stats.values(),
+        key=lambda x: (x['count'] + x['document_count'] * 10),  # 文档级标签权重更高
+        reverse=True
+    )
 
 
 def delete_tag_from_all_chunks(tag_name: str) -> int:
