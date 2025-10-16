@@ -22,6 +22,17 @@ class BatchConfigUpdateRequest(BaseModel):
     configs: Dict[str, float]
 
 
+class PromptUpdateRequest(BaseModel):
+    """提示词更新请求"""
+    prompt_key: str
+    prompt_value: str
+
+
+class BatchPromptUpdateRequest(BaseModel):
+    """批量提示词更新请求"""
+    prompts: Dict[str, str]
+
+
 @router.get("/rag")
 async def get_rag_configs(config_key: Optional[str] = None):
     """
@@ -186,3 +197,145 @@ async def reset_rag_configs():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置配置失败: {str(e)}")
+
+
+# ============================================
+# 提示词配置管理
+# ============================================
+
+@router.get("/prompts")
+async def get_prompt_configs(prompt_key: Optional[str] = None):
+    """
+    获取提示词配置
+
+    参数:
+        prompt_key: 可选的提示词键，如果提供则只返回该配置项
+
+    返回:
+        - 如果指定了 prompt_key，返回单个配置项
+        - 否则返回所有配置项（按分类分组）
+    """
+    try:
+        prompts = db.get_prompt_config(prompt_key)
+
+        if prompt_key:
+            if not prompts:
+                raise HTTPException(status_code=404, detail=f"提示词配置 {prompt_key} 不存在")
+            return prompts
+        else:
+            # 按分类分组
+            grouped = {}
+            for key, prompt in prompts.items():
+                category = prompt.get('category', 'other')
+                if category not in grouped:
+                    grouped[category] = {}
+                grouped[category][key] = prompt
+
+            return {
+                "prompts": prompts,
+                "grouped": grouped
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取提示词配置失败: {str(e)}")
+
+
+@router.put("/prompts")
+async def update_prompt_config(request: PromptUpdateRequest):
+    """
+    更新单个提示词配置项
+
+    参数:
+        prompt_key: 提示词键
+        prompt_value: 提示词内容
+
+    返回:
+        更新结果
+    """
+    try:
+        # 检查配置项是否存在
+        existing_prompt = db.get_prompt_config(request.prompt_key)
+        if not existing_prompt:
+            raise HTTPException(status_code=404, detail=f"提示词配置 {request.prompt_key} 不存在")
+
+        # 更新配置
+        success = db.update_prompt_config(request.prompt_key, request.prompt_value)
+
+        if not success:
+            raise HTTPException(status_code=500, detail="更新提示词配置失败")
+
+        return {
+            "success": True,
+            "message": f"提示词配置 {request.prompt_key} 已更新",
+            "prompt_key": request.prompt_key
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新提示词配置失败: {str(e)}")
+
+
+@router.put("/prompts/batch")
+async def batch_update_prompt_configs(request: BatchPromptUpdateRequest):
+    """
+    批量更新提示词配置
+
+    参数:
+        prompts: 配置字典 {prompt_key: prompt_value}
+
+    返回:
+        更新结果
+    """
+    try:
+        # 验证所有配置项
+        all_prompts = db.get_prompt_config()
+        errors = []
+
+        for prompt_key in request.prompts.keys():
+            if prompt_key not in all_prompts:
+                errors.append(f"提示词配置 {prompt_key} 不存在")
+
+        if errors:
+            raise HTTPException(status_code=400, detail="; ".join(errors))
+
+        # 批量更新
+        updated_count = db.batch_update_prompt_config(request.prompts)
+
+        return {
+            "success": True,
+            "message": f"成功更新 {updated_count} 个提示词配置",
+            "updated_count": updated_count,
+            "total_requested": len(request.prompts)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批量更新提示词配置失败: {str(e)}")
+
+
+@router.post("/prompts/reset")
+async def reset_prompt_configs():
+    """
+    重置所有提示词配置为默认值
+    """
+    try:
+        all_prompts = db.get_prompt_config()
+        reset_prompts = {}
+
+        for prompt_key, prompt in all_prompts.items():
+            default_value = prompt.get('default_value')
+            if default_value is not None:
+                reset_prompts[prompt_key] = default_value
+
+        updated_count = db.batch_update_prompt_config(reset_prompts)
+
+        return {
+            "success": True,
+            "message": f"成功重置 {updated_count} 个提示词配置",
+            "updated_count": updated_count
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重置提示词配置失败: {str(e)}")

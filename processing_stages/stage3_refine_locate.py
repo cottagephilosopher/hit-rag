@@ -362,7 +362,35 @@ class Stage3RefineLocate:
             切分结果列表
         """
         try:
-            system_prompt, user_prompt = get_chunking_prompts(
+            # 尝试从数据库获取自定义提示词
+            system_prompt = None
+            try:
+                from database import get_prompt_config
+                prompt_config = get_prompt_config('CHUNKING_SYSTEM')
+                if prompt_config:
+                    system_prompt = prompt_config.get('prompt_value')
+                    logger.debug("✅ 使用数据库中的自定义切分提示词")
+            except Exception as e:
+                logger.debug(f"从数据库获取切分提示词失败，使用默认提示词: {e}")
+
+            # 如果数据库中没有，使用默认提示词
+            if not system_prompt:
+                system_prompt, _ = get_chunking_prompts(chunk_text, estimated_tokens)
+                logger.debug("✅ 使用默认切分提示词模板")
+            else:
+                # 替换模板变量
+                from config import ChunkConfig
+
+                # 替换Token配置参数
+                system_prompt = system_prompt.replace('{{FINAL_MIN_TOKENS}}', str(ChunkConfig.FINAL_MIN_TOKENS))
+                system_prompt = system_prompt.replace('{{FINAL_TARGET_TOKENS}}', str(ChunkConfig.FINAL_TARGET_TOKENS))
+                system_prompt = system_prompt.replace('{{FINAL_MAX_TOKENS}}', str(ChunkConfig.FINAL_MAX_TOKENS))
+                system_prompt = system_prompt.replace('{{FINAL_HARD_LIMIT}}', str(ChunkConfig.FINAL_HARD_LIMIT))
+
+                logger.debug("✅ 已替换切分提示词模板变量")
+
+            # 生成用户提示词
+            _, user_prompt = get_chunking_prompts(
                 chunk_text,
                 estimated_tokens
             )

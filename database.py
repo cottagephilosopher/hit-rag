@@ -79,6 +79,13 @@ def init_database():
         with open(rag_config_schema_file, 'r', encoding='utf-8') as f:
             rag_config_schema_sql = f.read()
 
+    # 执行提示词配置表的 schema
+    prompt_config_schema_file = Path(__file__).parent / ".dbs/prompt_config_schema.sql"
+    prompt_config_schema_sql = ""
+    if prompt_config_schema_file.exists():
+        with open(prompt_config_schema_file, 'r', encoding='utf-8') as f:
+            prompt_config_schema_sql = f.read()
+
     with _DB_LOCK:
         with get_connection() as conn:
             # 执行文档表 schema
@@ -89,6 +96,9 @@ def init_database():
             # 执行 RAG 配置表 schema（如果存在）
             if rag_config_schema_sql:
                 conn.executescript(rag_config_schema_sql)
+            # 执行提示词配置表 schema（如果存在）
+            if prompt_config_schema_sql:
+                conn.executescript(prompt_config_schema_sql)
 
     print(f"✅ Database initialized at: {DB_FILE}")
 
@@ -1304,6 +1314,217 @@ def init_rag_config_from_env():
                 )
 
     print(f"✅ 已初始化 {len(default_configs)} 个 RAG 配置项")
+
+
+# ============================================
+# 提示词配置管理
+# ============================================
+
+def get_prompt_config(prompt_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    获取提示词配置
+
+    Args:
+        prompt_key: 可选的提示词键，如果提供则只返回该配置项
+
+    Returns:
+        配置字典或配置项
+    """
+    with get_connection() as conn:
+        if prompt_key:
+            row = conn.execute(
+                "SELECT * FROM prompt_config WHERE prompt_key = ?",
+                (prompt_key,)
+            ).fetchone()
+            return dict(row) if row else None
+        else:
+            rows = conn.execute(
+                "SELECT * FROM prompt_config ORDER BY category, id"
+            ).fetchall()
+            return {row['prompt_key']: dict(row) for row in rows}
+
+
+def update_prompt_config(prompt_key: str, prompt_value: str) -> bool:
+    """
+    更新提示词配置项
+
+    Args:
+        prompt_key: 提示词键
+        prompt_value: 提示词内容
+
+    Returns:
+        是否更新成功
+    """
+    with _DB_LOCK:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE prompt_config
+                SET prompt_value = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE prompt_key = ?
+                """,
+                (prompt_value, prompt_key)
+            )
+            return cursor.rowcount > 0
+
+
+def batch_update_prompt_config(configs: Dict[str, str]) -> int:
+    """
+    批量更新提示词配置
+
+    Args:
+        configs: 配置字典 {prompt_key: prompt_value}
+
+    Returns:
+        更新的配置项数量
+    """
+    updated_count = 0
+    with _DB_LOCK:
+        with get_connection() as conn:
+            for prompt_key, prompt_value in configs.items():
+                cursor = conn.execute(
+                    """
+                    UPDATE prompt_config
+                    SET prompt_value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE prompt_key = ?
+                    """,
+                    (prompt_value, prompt_key)
+                )
+                if cursor.rowcount > 0:
+                    updated_count += 1
+    return updated_count
+
+
+def init_prompt_config_from_templates():
+    """
+    从 prompt_templates.py 初始化提示词配置（如果表为空）
+    """
+    # 检查配置表是否为空
+    with get_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) as cnt FROM prompt_config").fetchone()['cnt']
+        if count > 0:
+            print("ℹ️  提示词配置已存在，跳过初始化")
+            return
+
+    # 默认提示词配置（使用模板变量，运行时动态替换）
+    default_prompts = [
+        {
+            'prompt_key': 'CLEAN_AND_TAG_SYSTEM',
+            'prompt_value': """你是一个专业的文档处理助手。你需要完成两个任务：
+
+## 任务1: 识别并标记版式杂质
+识别文档中的版式杂质（非核心内容），使用 <JUNK type="类型">内容</JUNK> 标记。
+
+### 杂质特征参考
+{{JUNK_FEATURES}}
+
+## 任务2: 提取文档标签
+分析文档内容，提取：
+1. 用户标签: 从系统现有标签中选择最匹配的
+2. 内容标签: 从系统现有标签中选择 {{CONTENT_TAG_COUNT}} 个最相关的
+
+### 系统现有标签
+{{EXISTING_TAGS}}
+
+## 输出格式
+请以 JSON 格式返回：
+{
+    "marked_text": "标记了杂质的完整文档...",
+    "user_tag": "用户标签",
+    "content_tags": ["标签1", "标签2", "标签3", "标签4", "标签5"]
+}
+
+## 重要约束
+1. marked_text 必须保留原文的所有格式（换行、空格、Markdown 语法）
+2. 只标记明确的杂质，不确定的保留
+3. **必须使用系统现有标签**：user_tag 和 content_tags 必须从系统现有标签列表中选择，不允许创建新标签
+4. **如果标签数量不足**：如果系统现有标签少于 {{CONTENT_TAG_COUNT}} 个，则尽量选择，不足的部分可以留空或重复使用
+5. 标签不要重复
+6. 必须返回有效的 JSON 格式
+
+请始终返回有效的 JSON 格式响应。""",
+            'description': '文档清洗和标签提取的系统提示词（支持变量：{{JUNK_FEATURES}}, {{EXISTING_TAGS}}, {{CONTENT_TAG_COUNT}}）',
+            'category': 'clean_tag',
+            'is_system_prompt': 1,
+        },
+        {
+            'prompt_key': 'CHUNKING_SYSTEM',
+            'prompt_value': """你是一个专业的文档切分助手，专门为 RAG（检索增强生成）系统准备文档块。
+
+## 任务说明
+请将提供的文档片段切分成多个语义连贯的小块，每块用于 RAG 检索。
+
+## 切分原则（语义完整性优先）
+
+**核心原则**: 语义完整性 > Token 数量限制
+
+1. **Token 参考值**:
+   - **最小值**: {{FINAL_MIN_TOKENS}} tokens（硬性要求，避免切片过小）
+   - **目标值**: {{FINAL_TARGET_TOKENS}} tokens（理想大小，尽量接近）
+   - **建议最大值**: {{FINAL_MAX_TOKENS}} tokens（可超出，优先保证语义完整）
+   - **硬性上限**: {{FINAL_HARD_LIMIT}} tokens（安全阀，超出此值必须切分）
+
+2. **语义完整性要求**（优先级从高到低）:
+   - **句子完整性**: 绝不允许在句子中间切断
+   - **段落完整性**: 尽量保持段落完整，不要将段落拆分
+   - **小节完整性**: 标题与其内容必须在同一 chunk
+   - **语义单元完整性**: 完整的概念、步骤、示例应保持在一起
+
+## 特殊标记（ATOMIC 块）
+对于以下内容，**必须**使用 <ATOMIC-TYPE> 标签标记：
+- **表格**: <ATOMIC-TABLE>表格内容</ATOMIC-TABLE>
+- **代码块**: <ATOMIC-CODE>代码内容</ATOMIC-CODE>
+- **步骤序列**: <ATOMIC-STEP>步骤序列内容</ATOMIC-STEP>
+- **语义完整的大段落**: <ATOMIC-CONTENT>完整内容</ATOMIC-CONTENT>
+
+## 输出格式
+请以 JSON 格式返回切分结果：
+{
+    "chunks": [
+        {
+            "content": "第一块的完整内容",
+            "is_atomic": false,
+            "atomic_type": null
+        },
+        {
+            "content": "<ATOMIC-TABLE>表格内容</ATOMIC-TABLE>",
+            "is_atomic": true,
+            "atomic_type": "table"
+        }
+    ]
+}
+
+请始终返回有效的 JSON 格式响应。""",
+            'description': '文档切分的系统提示词（支持变量：{{FINAL_MIN_TOKENS}}, {{FINAL_TARGET_TOKENS}}, {{FINAL_MAX_TOKENS}}, {{FINAL_HARD_LIMIT}}）',
+            'category': 'chunk',
+            'is_system_prompt': 1,
+        },
+    ]
+
+    with _DB_LOCK:
+        with get_connection() as conn:
+            for prompt in default_prompts:
+                # 设置默认值与初始值相同
+                prompt['default_value'] = prompt['prompt_value']
+
+                conn.execute(
+                    """
+                    INSERT INTO prompt_config (
+                        prompt_key, prompt_value, description, category,
+                        is_system_prompt, default_value
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        prompt['prompt_key'],
+                        prompt['prompt_value'],
+                        prompt['description'],
+                        prompt['category'],
+                        prompt['is_system_prompt'],
+                        prompt['default_value']
+                    )
+                )
+
+    print(f"✅ 初始化了 {len(default_prompts)} 个提示词配置")
 
 
 if __name__ == '__main__':

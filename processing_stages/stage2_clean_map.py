@@ -227,8 +227,44 @@ class Stage2CleanMap:
             # 获取系统现有标签
             existing_tags = self._fetch_system_tags()
 
-            # 使用现有标签生成 prompt
-            system_prompt, user_prompt = get_combined_clean_and_tag_prompts(
+            # 尝试从数据库获取自定义提示词
+            system_prompt = None
+            try:
+                from database import get_prompt_config
+                prompt_config = get_prompt_config('CLEAN_AND_TAG_SYSTEM')
+                if prompt_config:
+                    system_prompt = prompt_config.get('prompt_value')
+                    logger.debug("✅ 使用数据库中的自定义提示词")
+            except Exception as e:
+                logger.debug(f"从数据库获取提示词失败，使用默认提示词: {e}")
+
+            # 如果数据库中没有，使用默认提示词
+            if not system_prompt:
+                from llm_api.prompt_templates import PromptTemplates
+                system_prompt = PromptTemplates.get_combined_clean_and_tag_system_prompt(existing_tags)
+                logger.debug("✅ 使用默认提示词模板")
+            else:
+                # 替换模板变量
+                from config import JunkPatterns, TagConfig
+
+                # 替换杂质特征
+                junk_features_str = "\n".join(
+                    f"- {jtype}: {desc}"
+                    for jtype, desc in JunkPatterns.JUNK_FEATURES.items()
+                )
+                system_prompt = system_prompt.replace('{{JUNK_FEATURES}}', junk_features_str)
+
+                # 替换标签列表
+                tags_str = ", ".join(existing_tags) if existing_tags else "暂无标签"
+                system_prompt = system_prompt.replace('{{EXISTING_TAGS}}', tags_str)
+
+                # 替换标签数量
+                system_prompt = system_prompt.replace('{{CONTENT_TAG_COUNT}}', str(TagConfig.CONTENT_TAG_COUNT))
+
+                logger.debug("✅ 已替换提示词模板变量")
+
+            # 生成用户提示词
+            _, user_prompt = get_combined_clean_and_tag_prompts(
                 chunk_text,
                 existing_tags=existing_tags
             )
