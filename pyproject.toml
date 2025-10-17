@@ -22,4 +22,7 @@ dependencies = [
     "dspy-ai>=3.0.3",
     "dspy>=3.0.3",
     "loguru>=0.7.3",
+    "python-multipart>=0.0.20",
+    "aiohttp>=3.13.0",
+    "tos>=2.8.7",
 ]

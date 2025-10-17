@@ -58,6 +58,7 @@ def init_sqlite_database(force: bool = False):
     chat_schema_file = db_dir / "chat_schema.sql"
     rag_config_schema_file = db_dir / "rag_config_schema.sql"
     prompt_config_schema_file = db_dir / "prompt_config_schema.sql"
+    file_upload_schema_file = db_dir / "file_upload_schema.sql"
 
     if not schema_file.exists():
         print(f"  ❌ Schema 文件不存在: {schema_file}")
@@ -94,6 +95,13 @@ def init_sqlite_database(force: bool = False):
             with open(prompt_config_schema_file, 'r', encoding='utf-8') as f:
                 prompt_config_schema_sql = f.read()
             cursor.executescript(prompt_config_schema_sql)
+
+        # 执行文件上传 schema（如果存在）
+        if file_upload_schema_file.exists():
+            print_step("创建文件上传管理表", "")
+            with open(file_upload_schema_file, 'r', encoding='utf-8') as f:
+                file_upload_schema_sql = f.read()
+            cursor.executescript(file_upload_schema_sql)
 
         conn.commit()
         conn.close()
