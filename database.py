@@ -735,6 +735,13 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
     """
     获取所有标签及其统计信息
 
+    标签分类规则：
+    - 用户标签：content_tags 中带 @ 前缀的标签（用户手动添加）
+    - 内容标签：content_tags 中不带 @ 前缀的标签（LLM 自动生成，不算用户标签）
+    - 文档标签：document_tags 表中的标签
+
+    注意：user_tag 字段是 LLM 生成的主标签，不算"用户标签"
+
     Returns:
         标签列表，每个标签包含：
         - name: 标签名称
@@ -744,15 +751,7 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
         - document_count: 文档级标签关联的文档数量
     """
     with get_connection() as conn:
-        # 收集所有 user_tag
-        user_tag_rows = conn.execute("""
-            SELECT user_tag, GROUP_CONCAT(id) as chunk_ids, COUNT(*) as count
-            FROM document_chunks
-            WHERE user_tag IS NOT NULL AND user_tag != ''
-            GROUP BY user_tag
-        """).fetchall()
-
-        # 收集所有 content_tags
+        # 收集所有 content_tags（LLM 生成的标签 + 用户手动添加的标签）
         content_tag_rows = conn.execute("""
             SELECT id, content_tags
             FROM document_chunks
@@ -769,42 +768,44 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
     # 统计标签
     tag_stats = {}
 
-    # 处理 user_tags
-    for row in user_tag_rows:
-        tag_name = row['user_tag']
-        chunk_ids = [int(x) for x in row['chunk_ids'].split(',')]
-        tag_stats[tag_name] = {
-            'name': tag_name,
-            'type': 'user_tag',
-            'count': row['count'],
-            'chunk_ids': chunk_ids,
-            'document_count': 0
-        }
-
     # 处理 content_tags
     for row in content_tag_rows:
         chunk_id = row['id']
         tags = _json_load(row['content_tags']) or []
 
         for tag in tags:
-            # 移除 @ 前缀（人工标签）
-            clean_tag = tag.lstrip('@') if isinstance(tag, str) else tag
+            if not isinstance(tag, str):
+                continue
+
+            # 检查是否是用户手动添加的标签（带 @ 前缀）
+            is_user_added = tag.startswith('@')
+            clean_tag = tag.lstrip('@')
+
             if not clean_tag:
                 continue
 
+            # 确定标签类型：只有带 @ 前缀的才是"用户标签"
+            if is_user_added:
+                tag_type = 'user_tag'
+            else:
+                tag_type = 'content_tag'  # LLM 生成的内容标签
+
             if clean_tag in tag_stats:
-                # 标签已存在（可能来自 user_tag）
-                if tag_stats[clean_tag]['type'] == 'user_tag':
+                # 标签已存在
+                existing_type = tag_stats[clean_tag]['type']
+
+                # 如果已存在的标签类型和当前不同，标记为 multiple
+                if existing_type != tag_type and existing_type != 'multiple':
                     tag_stats[clean_tag]['type'] = 'multiple'
-                elif tag_stats[clean_tag]['type'] == 'content_tag':
-                    pass  # 保持为 content_tag
+
                 tag_stats[clean_tag]['count'] += 1
                 if chunk_id not in tag_stats[clean_tag]['chunk_ids']:
                     tag_stats[clean_tag]['chunk_ids'].append(chunk_id)
             else:
+                # 新标签
                 tag_stats[clean_tag] = {
                     'name': clean_tag,
-                    'type': 'content_tag',
+                    'type': tag_type,
                     'count': 1,
                     'chunk_ids': [chunk_id],
                     'document_count': 0
@@ -840,36 +841,17 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
 
 def get_content_tags_for_llm() -> List[str]:
     """
-    获取用于LLM标签推理的标签列表（不包含文档级标签）
+    获取用于LLM标签推理的标签列表（只从系统标签表查询）
 
-    仅返回内容标签和预置标签，排除文档级标签（文件标签）。
-    这样可以避免chunk的内容标签与文档级标签混淆。
+    新的标签架构：
+    - 系统标签（system_tags表）：用于 LLM 标签推理
+    - 用户标签（chunks中）：用户手动添加的标签，不可用于 LLM 推理（除非转换为系统标签）
+    - 文档标签（document_tags表）：仅用于文档级筛选和向量检索
 
     Returns:
-        标签名称列表（去重后）
+        系统标签名称列表
     """
-    # 获取所有标签统计
-    all_tags = get_all_tags_with_stats()
-
-    # 过滤出内容标签（排除纯文档级标签）
-    content_tag_names = set()
-    for tag in all_tags:
-        tag_type = tag.get('type', '')
-        # 只保留 user_tag, content_tag, multiple 类型
-        # 排除 document_tag（纯文档级标签）
-        if tag_type in ['user_tag', 'content_tag', 'multiple']:
-            content_tag_names.add(tag['name'])
-
-    # 添加预置标签
-    try:
-        from config import TagConfig
-        preset_tags = set(TagConfig.USER_DEFINED_TAGS)
-        content_tag_names.update(preset_tags)
-    except ImportError:
-        pass  # 如果无法导入配置，只使用数据库中的标签
-
-    # 返回排序后的列表
-    return sorted(list(content_tag_names))
+    return get_system_tags(active_only=True)
 
 
 def delete_tag_from_all_chunks(tag_name: str) -> int:
@@ -1080,6 +1062,216 @@ def merge_tags_in_all_chunks(source_tags: List[str], target_tag: str) -> Dict[st
         'affected_chunks': len(affected_chunks),
         'merged_count': len(source_tags)
     }
+
+
+# ============================================
+# 系统标签管理（用于 LLM 标签推理）
+# ============================================
+
+def get_system_tags(active_only: bool = True) -> List[str]:
+    """
+    获取系统标签列表（用于 LLM 标签推理）
+
+    Args:
+        active_only: 是否只返回启用的标签
+
+    Returns:
+        系统标签名称列表
+    """
+    with get_connection() as conn:
+        query = "SELECT tag_name FROM system_tags"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY created_at ASC"
+
+        rows = conn.execute(query).fetchall()
+        return [row['tag_name'] for row in rows]
+
+
+def add_system_tag(tag_name: str, description: str = None, created_by: str = 'admin') -> bool:
+    """
+    添加系统标签
+
+    Args:
+        tag_name: 标签名称
+        description: 标签描述
+        created_by: 创建来源 (system | admin | converted_from_user)
+
+    Returns:
+        是否添加成功
+    """
+    tag_name = tag_name.strip()
+    if not tag_name:
+        return False
+
+    with _DB_LOCK:
+        with get_connection() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO system_tags (tag_name, description, created_by)
+                    VALUES (?, ?, ?)
+                    """,
+                    (tag_name, description, created_by)
+                )
+                return True
+            except sqlite3.IntegrityError:
+                # 标签已存在
+                return False
+
+
+def remove_system_tag(tag_name: str) -> bool:
+    """
+    删除系统标签（软删除，设置 is_active = 0）
+
+    Args:
+        tag_name: 标签名称
+
+    Returns:
+        是否删除成功
+    """
+    with _DB_LOCK:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE system_tags SET is_active = 0 WHERE tag_name = ?",
+                (tag_name,)
+            )
+            return cursor.rowcount > 0
+
+
+def hard_delete_system_tag(tag_name: str) -> bool:
+    """
+    硬删除系统标签（物理删除）
+
+    Args:
+        tag_name: 标签名称
+
+    Returns:
+        是否删除成功
+    """
+    with _DB_LOCK:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM system_tags WHERE tag_name = ?",
+                (tag_name,)
+            )
+            return cursor.rowcount > 0
+
+
+def rename_system_tag(old_name: str, new_name: str) -> bool:
+    """
+    重命名系统标签
+
+    Args:
+        old_name: 旧标签名
+        new_name: 新标签名
+
+    Returns:
+        是否重命名成功
+    """
+    new_name = new_name.strip()
+    if not new_name:
+        return False
+
+    with _DB_LOCK:
+        with get_connection() as conn:
+            try:
+                cursor = conn.execute(
+                    "UPDATE system_tags SET tag_name = ? WHERE tag_name = ?",
+                    (new_name, old_name)
+                )
+                return cursor.rowcount > 0
+            except sqlite3.IntegrityError:
+                # 新标签名已存在
+                return False
+
+
+def convert_user_tag_to_system(tag_name: str, description: str = None) -> bool:
+    """
+    将用户标签转换为系统标签
+
+    Args:
+        tag_name: 标签名称
+        description: 标签描述
+
+    Returns:
+        是否转换成功
+    """
+    # 检查用户标签是否存在
+    all_tags = get_all_tags_with_stats()
+    user_tag = next((tag for tag in all_tags if tag['name'] == tag_name and tag['type'] == 'user_tag'), None)
+
+    if not user_tag:
+        return False
+
+    # 添加到系统标签（如果不存在）
+    success = add_system_tag(tag_name, description, created_by='converted_from_user')
+
+    if not success:
+        return False
+
+    # 从所有 chunks 的 content_tags 中移除带 @ 前缀的该标签
+    tag_with_prefix = f"@{tag_name}"
+
+    with _DB_LOCK:
+        with get_connection() as conn:
+            # 获取所有包含该用户标签的 chunks
+            chunks = conn.execute("""
+                SELECT id, content_tags
+                FROM document_chunks
+                WHERE content_tags LIKE ?
+            """, (f'%{tag_with_prefix}%',)).fetchall()
+
+            # 逐个更新 chunk，移除该标签
+            for chunk in chunks:
+                chunk_id = chunk[0]
+                content_tags = _json_load(chunk[1])
+
+                if tag_with_prefix in content_tags:
+                    content_tags.remove(tag_with_prefix)
+                    conn.execute("""
+                        UPDATE document_chunks
+                        SET content_tags = ?
+                        WHERE id = ?
+                    """, (_json_dump(content_tags), chunk_id))
+
+    return True
+
+
+def get_system_tags_with_stats() -> List[Dict[str, Any]]:
+    """
+    获取系统标签及其统计信息
+
+    Returns:
+        系统标签列表，每个标签包含：
+        - id: 标签ID
+        - tag_name: 标签名称
+        - description: 标签描述
+        - created_at: 创建时间
+        - created_by: 创建来源
+        - is_active: 是否启用
+        - usage_count: 在 chunks 中的使用次数
+    """
+    with get_connection() as conn:
+        # 获取系统标签
+        system_tag_rows = conn.execute("""
+            SELECT id, tag_name, description, created_at, created_by, is_active
+            FROM system_tags
+            ORDER BY created_at ASC
+        """).fetchall()
+
+    # 获取所有用户标签使用统计
+    all_tags_stats = get_all_tags_with_stats()
+    usage_dict = {tag['name']: tag['count'] for tag in all_tags_stats}
+
+    # 组装结果
+    result = []
+    for row in system_tag_rows:
+        tag_dict = dict(row)
+        tag_dict['usage_count'] = usage_dict.get(tag_dict['tag_name'], 0)
+        result.append(tag_dict)
+
+    return result
 
 
 # ============================================

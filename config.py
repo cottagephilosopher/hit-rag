@@ -122,25 +122,15 @@ class JunkPatterns:
 class TagConfig:
     """文档标签相关配置"""
 
-    # 用户定义标签列表（预设类型）
-    USER_DEFINED_TAGS = [
-        "技术文档",
-        "API文档",
-        "用户手册",
-        "开发指南",
-        "市场报告",
-        "产品说明",
-        "研究论文",
-        "教程文档",
-        "配置说明",
-        "故障排查"
-    ]
-
     # 内容推理标签数量
     CONTENT_TAG_COUNT = int(os.getenv("CONTENT_TAG_COUNT", "5"))
 
     # 标签推理语言
     TAG_LANGUAGE = os.getenv("TAG_LANGUAGE", "中文")
+
+    # 注意：预置标签已移除，改用数据库 system_tags 表管理
+    # 系统标签通过"统一标签管理"界面创建，用户标签可在切片编辑时添加
+    # 用户标签可通过转换按钮转为系统标签后，才能用于 LLM 标签推理
 
 
 # ==================== 日志配置 ====================
@@ -318,6 +308,14 @@ def validate_config():
 
 def get_config_summary():
     """获取配置摘要信息"""
+    # 从数据库获取系统标签数量
+    try:
+        from database import get_system_tags
+        system_tags = get_system_tags(active_only=True)
+        tag_count = len(system_tags)
+    except Exception:
+        tag_count = 0  # 如果数据库未初始化，返回0
+
     return {
         "llm_provider": LLMConfig.PROVIDER,
         "tokenizer": TokenizerConfig.ENCODING_NAME,
@@ -326,7 +324,7 @@ def get_config_summary():
             "final_min_tokens": ChunkConfig.FINAL_MIN_TOKENS,
             "final_max_tokens": ChunkConfig.FINAL_MAX_TOKENS,
         },
-        "tag_count": len(TagConfig.USER_DEFINED_TAGS),
+        "tag_count": tag_count,
         "junk_types": len(JunkPatterns.JUNK_TYPES)
     }
 

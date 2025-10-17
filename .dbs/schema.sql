@@ -98,7 +98,21 @@ CREATE TABLE IF NOT EXISTS document_tags (
 );
 
 -- ============================================
--- 5. 索引优化
+-- 5. 系统标签表 (system_tags)
+-- ============================================
+-- 用于 LLM 生成标签时的候选标签列表
+-- 与用户标签分离，只有系统标签可用于 LLM 标签推理
+CREATE TABLE IF NOT EXISTS system_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_name TEXT NOT NULL UNIQUE,              -- 标签名称（唯一）
+    description TEXT,                           -- 标签描述（可选）
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT DEFAULT 'system',           -- 创建来源：system | admin | converted_from_user
+    is_active BOOLEAN DEFAULT TRUE              -- 是否启用（便于软删除）
+);
+
+-- ============================================
+-- 6. 索引优化
 -- ============================================
 
 -- 文档表索引
@@ -124,8 +138,12 @@ CREATE INDEX IF NOT EXISTS idx_logs_chunk_time ON document_logs(chunk_id, create
 CREATE INDEX IF NOT EXISTS idx_tags_document ON document_tags(document_id);
 CREATE INDEX IF NOT EXISTS idx_tags_order ON document_tags(document_id, tag_order);
 
+-- 系统标签表索引
+CREATE INDEX IF NOT EXISTS idx_system_tags_name ON system_tags(tag_name);
+CREATE INDEX IF NOT EXISTS idx_system_tags_active ON system_tags(is_active);
+
 -- ============================================
--- 5. 触发器：自动更新 updated_at
+-- 7. 触发器：自动更新 updated_at
 -- ============================================
 
 -- 文档表更新触发器
@@ -145,7 +163,7 @@ BEGIN
 END;
 
 -- ============================================
--- 6. 初始化说明
+-- 8. 初始化说明
 -- ============================================
 -- 使用 init_system.py 脚本初始化数据库
 -- 该脚本会自动创建所有表结构并验证连接

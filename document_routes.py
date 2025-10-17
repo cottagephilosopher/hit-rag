@@ -32,7 +32,14 @@ from database import (
     merge_tags_in_all_chunks,
     create_document,
     create_chunk,
-    get_chunks_by_document
+    get_chunks_by_document,
+    # 系统标签管理
+    get_system_tags,
+    get_system_tags_with_stats,
+    add_system_tag,
+    remove_system_tag,
+    rename_system_tag,
+    convert_user_tag_to_system
 )
 
 from vector_db.vectorization_manager import VectorizationManager
@@ -153,6 +160,26 @@ class TagMergeRequest(BaseModel):
 
 class TagCreateRequest(BaseModel):
     tag_name: str
+
+
+class SystemTagResponse(BaseModel):
+    id: int
+    tag_name: str
+    description: Optional[str]
+    created_at: str
+    created_by: str
+    is_active: bool
+    usage_count: int
+
+
+class SystemTagCreateRequest(BaseModel):
+    tag_name: str
+    description: Optional[str] = None
+
+
+class SystemTagConvertRequest(BaseModel):
+    tag_name: str
+    description: Optional[str] = None
 
 
 # ==================== Helper Functions ====================
@@ -979,3 +1006,111 @@ async def search_chunks(request: SearchRequest):
         error_detail = f"搜索失败: {str(e)}\n{traceback.format_exc()}"
         print(error_detail)
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+# ============================================
+# 系统标签管理 API
+# ============================================
+
+@router.get("/api/system-tags", response_model=List[SystemTagResponse])
+async def get_all_system_tags():
+    """获取所有系统标签及统计信息"""
+    try:
+        tags = get_system_tags_with_stats()
+        return tags
+    except Exception as e:
+        import traceback
+        error_detail = f"获取系统标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"获取系统标签失败: {str(e)}")
+
+
+@router.post("/api/system-tags")
+async def create_system_tag(request: SystemTagCreateRequest):
+    """创建新的系统标签"""
+    try:
+        tag_name = request.tag_name.strip()
+        if not tag_name:
+            raise HTTPException(status_code=400, detail="标签名称不能为空")
+
+        success = add_system_tag(tag_name, request.description, created_by='admin')
+        if not success:
+            raise HTTPException(status_code=400, detail=f"标签 '{tag_name}' 已存在")
+
+        return {"message": f"系统标签 '{tag_name}' 创建成功"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"创建系统标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"创建系统标签失败: {str(e)}")
+
+
+@router.delete("/api/system-tags/{tag_name}")
+async def delete_system_tag(tag_name: str):
+    """删除系统标签（软删除）"""
+    try:
+        success = remove_system_tag(tag_name)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"系统标签 '{tag_name}' 不存在")
+
+        return {"message": f"系统标签 '{tag_name}' 已删除"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"删除系统标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"删除系统标签失败: {str(e)}")
+
+
+@router.post("/api/system-tags/convert")
+async def convert_user_tag_to_system_tag(request: SystemTagConvertRequest):
+    """将用户标签转换为系统标签"""
+    try:
+        tag_name = request.tag_name.strip()
+        if not tag_name:
+            raise HTTPException(status_code=400, detail="标签名称不能为空")
+
+        success = convert_user_tag_to_system(tag_name, request.description)
+        if not success:
+            raise HTTPException(status_code=400, detail=f"转换失败：标签 '{tag_name}' 不存在或已是系统标签")
+
+        return {"message": f"标签 '{tag_name}' 已转换为系统标签"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"转换标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"转换标签失败: {str(e)}")
+
+
+@router.put("/api/system-tags/{old_name}")
+async def rename_system_tag_endpoint(old_name: str, request: SystemTagCreateRequest):
+    """重命名系统标签"""
+    try:
+        new_name = request.tag_name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="新标签名称不能为空")
+
+        if old_name == new_name:
+            raise HTTPException(status_code=400, detail="新旧标签名称相同")
+
+        success = rename_system_tag(old_name, new_name)
+        if not success:
+            raise HTTPException(status_code=400, detail=f"重命名失败：标签 '{old_name}' 不存在或新标签名 '{new_name}' 已存在")
+
+        return {"message": f"系统标签 '{old_name}' 已重命名为 '{new_name}'"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"重命名系统标签失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"重命名系统标签失败: {str(e)}")

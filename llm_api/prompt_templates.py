@@ -98,11 +98,15 @@ class PromptTemplates:
         Returns:
             系统提示词
         """
-        # 如果没有提供现有标签，使用配置中的默认标签
+        # 如果没有提供现有标签，从数据库获取系统标签
         if existing_tags is None or len(existing_tags) == 0:
-            existing_tags = TagConfig.USER_DEFINED_TAGS
+            try:
+                from database import get_system_tags
+                existing_tags = get_system_tags(active_only=True)
+            except Exception:
+                existing_tags = []  # 如果数据库未初始化，使用空列表
 
-        tags_str = ", ".join(existing_tags)
+        tags_str = ", ".join(existing_tags) if existing_tags else "未分类"
 
         return f"""你是一个专业的文档分类和关键词提取助手。
 
@@ -295,11 +299,15 @@ Chunk 2: [相关内容B]
             for jtype, desc in JunkPatterns.JUNK_FEATURES.items()
         )
 
-        # 如果没有提供现有标签，使用配置中的默认标签
+        # 如果没有提供现有标签，从数据库获取系统标签
         if existing_tags is None or len(existing_tags) == 0:
-            existing_tags = TagConfig.USER_DEFINED_TAGS
+            try:
+                from database import get_system_tags
+                existing_tags = get_system_tags(active_only=True)
+            except Exception:
+                existing_tags = []  # 如果数据库未初始化，使用空列表
 
-        tags_str = ", ".join(existing_tags)
+        tags_str = ", ".join(existing_tags) if existing_tags else "未分类"
 
         return f"""你是一个专业的文档处理助手。你需要完成两个任务：
 
