@@ -41,7 +41,9 @@ class Stage3RefineLocate:
 
     def _fetch_system_tags(self) -> List[str]:
         """
-        从数据库直接获取系统现有标签
+        从数据库获取用于LLM标签推理的标签列表
+
+        仅返回内容标签和预置标签，排除文档级标签（文件标签）
 
         Returns:
             标签列表
@@ -50,22 +52,89 @@ class Stage3RefineLocate:
             return self._cached_tags
 
         try:
-            # 直接从数据库获取标签（更可靠）
+            # 获取内容标签（排除文档级标签）
             try:
-                from database import get_all_tags_with_stats
+                from database import get_content_tags_for_llm
             except ImportError:
-                from ..database import get_all_tags_with_stats
+                from ..database import get_content_tags_for_llm
 
-            tags_data = get_all_tags_with_stats()
-            # 提取标签名称（去重）
-            tags = list(set(tag["name"] for tag in tags_data))
+            tags = get_content_tags_for_llm()
             self._cached_tags = tags
-            logger.info(f"✅ 从数据库获取了 {len(tags)} 个系统标签: {tags[:10]}...")
+            logger.info(f"✅ 从数据库获取了 {len(tags)} 个内容标签（已排除文档级标签）: {tags[:10]}...")
             return tags
 
         except Exception as e:
             logger.warning(f"⚠️ 无法从数据库获取标签: {e}")
             return []
+
+    def _select_tag_from_existing(
+        self,
+        content_preview: str,
+        section_title: str,
+        existing_tags: List[str]
+    ) -> str:
+        """
+        使用 LLM 从已有标签列表中选择最匹配的标签
+
+        Args:
+            content_preview: 内容预览（前300字符）
+            section_title: 章节标题
+            existing_tags: 系统已有标签列表
+
+        Returns:
+            选择的标签
+        """
+        # 如果没有可用标签，返回 None
+        if not existing_tags:
+            return None
+
+        # 如果标题完全匹配某个已有标签，直接使用
+        if section_title and section_title in existing_tags:
+            return section_title
+
+        # 构建简短的 prompt
+        tags_str = ", ".join(existing_tags)
+        system_prompt = f"""你是一个标签选择助手。从给定的标签列表中选择最匹配的一个标签。
+
+可选标签列表：
+{tags_str}
+
+要求：
+1. 必须从上述标签列表中选择一个
+2. 不允许创建新标签
+3. 如果都不太匹配，选择"未分类"（如果有）或第一个标签
+4. 只返回标签名称，不要任何解释"""
+
+        user_prompt = f"""章节标题：{section_title or '无标题'}
+
+内容预览：
+{content_preview[:300]}
+
+请从标签列表中选择最匹配的一个标签："""
+
+        try:
+            response = self.llm_client.chat_with_system(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.1,
+                max_tokens=50
+            )
+
+            # 清理响应，提取标签
+            selected_tag = response.strip().strip('"').strip("'")
+
+            # 验证选择的标签是否在列表中
+            if selected_tag in existing_tags:
+                logger.debug(f"✅ LLM选择标签: '{selected_tag}' for '{section_title}'")
+                return selected_tag
+            else:
+                # 如果LLM返回的不在列表中，使用默认值
+                logger.warning(f"⚠️ LLM返回的标签 '{selected_tag}' 不在列表中，使用默认值")
+                return "未分类" if "未分类" in existing_tags else existing_tags[0]
+
+        except Exception as e:
+            logger.warning(f"⚠️ LLM标签选择失败: {e}，使用默认值")
+            return "未分类" if "未分类" in existing_tags else existing_tags[0]
 
     def process(self, stage2_result: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1481,15 +1550,15 @@ class Stage3RefineLocate:
             if tag in existing_tags:
                 content_tags.append(tag)
 
-        # 处理 user_tag：只使用系统中已存在的标签
+        # 处理 user_tag：使用 LLM 从已有标签中智能选择
         # 【重要】不使用文档标题作为标签，必须从已有标签中选择
         node_title = node.get('title', '')
-        if node_title and node_title in existing_tags:
-            # 如果节点标题恰好是已有标签，则使用
-            user_tag = node_title
-        else:
-            # 否则，使用默认标签或第一个已有标签
-            user_tag = "未分类" if "未分类" in existing_tags else (existing_tags[0] if existing_tags else None)
+        content_preview = section_text[:300] if section_text else ''
+        user_tag = self._select_tag_from_existing(
+            content_preview=content_preview,
+            section_title=node_title,
+            existing_tags=existing_tags
+        )
 
         return {
             "content": section_text,

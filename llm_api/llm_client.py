@@ -50,9 +50,15 @@ class LLMClient:
                 )
 
             elif self.provider == "openai":
-                self.client = OpenAI(
-                    api_key=LLMConfig.OPENAI_API_KEY
-                )
+                # 构建 OpenAI 客户端参数
+                openai_params = {"api_key": LLMConfig.OPENAI_API_KEY}
+
+                # 如果配置了自定义 base_url（如 XHub），则使用它
+                if LLMConfig.OPENAI_API_BASE:
+                    openai_params["base_url"] = LLMConfig.OPENAI_API_BASE
+                    logger.info(f"🔗 使用自定义 API 端点: {LLMConfig.OPENAI_API_BASE}")
+
+                self.client = OpenAI(**openai_params)
                 self.model_name = LLMConfig.OPENAI_MODEL
                 logger.info(
                     f"✅ OpenAI 客户端初始化成功: {self.model_name}"

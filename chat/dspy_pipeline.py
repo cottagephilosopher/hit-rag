@@ -98,6 +98,59 @@ class DSPyRAGPipeline:
         logger.info(f"   对话记忆缓存窗口: {memory_window}")
 
     @staticmethod
+    def _safe_parse_confidence(value: Any, default: float = 0.5) -> float:
+        """
+        安全地解析置信度值，容错处理各种格式
+
+        Args:
+            value: 待解析的值（可能是数字、字符串、或包含数字的文本）
+            default: 解析失败时的默认值
+
+        Returns:
+            解析后的浮点数
+        """
+        try:
+            # 如果已经是数字类型，直接返回
+            if isinstance(value, (int, float)):
+                return float(value)
+
+            # 转换为字符串并清理
+            str_value = str(value).strip()
+
+            # 尝试直接转换
+            try:
+                return float(str_value)
+            except ValueError:
+                pass
+
+            # 尝试从文本中提取数字（如 "0.75" 或 "High - 0.75" 或 "置信度: 0.75"）
+            import re
+            # 匹配 0.0 到 1.0 范围的小数
+            match = re.search(r'\b([0-1]?\.\d+|0|1)\b', str_value)
+            if match:
+                confidence = float(match.group(1))
+                # 确保在合理范围内
+                if 0.0 <= confidence <= 1.0:
+                    logger.debug(f"从文本 '{str_value[:50]}...' 中提取置信度: {confidence}")
+                    return confidence
+
+            # 尝试映射文本描述到数值
+            str_lower = str_value.lower()
+            if 'high' in str_lower or '高' in str_lower:
+                return 0.8
+            elif 'medium' in str_lower or '中' in str_lower:
+                return 0.5
+            elif 'low' in str_lower or '低' in str_lower:
+                return 0.3
+
+            logger.warning(f"无法解析置信度值: '{str_value[:100]}', 使用默认值 {default}")
+            return default
+
+        except Exception as e:
+            logger.warning(f"解析置信度时出错: {e}, 使用默认值 {default}")
+            return default
+
+    @staticmethod
     def _build_history_chunk(conversation_history: str) -> Optional[Dict[str, Any]]:
         """将纯文本对话历史包装成检索片段，用于回退"""
         cleaned = (conversation_history or "").strip()
@@ -168,12 +221,22 @@ class DSPyRAGPipeline:
 
             else:
                 # 标准 OpenAI 配置
-                api_base = os.getenv('API_BASE')
-                api_key = os.getenv('API_KEY') or os.getenv('OPENAI_API_KEY')
-                model = os.getenv('MODEL_NAME') or os.getenv('OPENAI_MODEL', 'gpt-4o')
+                api_base = os.getenv('OPENAI_API_BASE') or os.getenv('API_BASE')
+                api_key = os.getenv('OPENAI_API_KEY') or os.getenv('API_KEY')
+                model = os.getenv('OPENAI_MODEL') or os.getenv('MODEL_NAME', 'gpt-4o')
+
+                # 如果模型名不是以 openai/ 开头，添加前缀以避免被 LiteLLM 误识别
+                # 例如 claude-sonnet-4-20250514 会被识别为 Anthropic，需要加 openai/ 前缀
+                if not model.startswith('openai/'):
+                    model = f'openai/{model}'
+                    logger.info(f"🔄 添加 openai/ 前缀以避免模型名被误识别: {model}")
 
                 lm = dspy.LM(model=model, api_base=api_base, api_key=api_key, temperature=temperature, max_tokens=2000)
-                logger.info(f"✅ DSPy configured with OpenAI: {model}")
+
+                if api_base:
+                    logger.info(f"✅ DSPy configured with OpenAI-compatible endpoint: {model} @ {api_base}")
+                else:
+                    logger.info(f"✅ DSPy configured with OpenAI: {model}")
 
             dspy.configure(lm=lm)
 
@@ -206,7 +269,7 @@ class DSPyRAGPipeline:
 
             return {
                 "intent": result.intent.lower(),
-                "confidence": float(result.confidence),
+                "confidence": self._safe_parse_confidence(result.confidence),
                 "business_relevance": result.business_relevance.lower(),
                 "reasoning": result.reasoning
             }
@@ -371,7 +434,7 @@ class DSPyRAGPipeline:
 
             return {
                 "relevant_tags": relevant_tags,
-                "confidence": float(result.confidence),
+                "confidence": self._safe_parse_confidence(result.confidence),
                 "reasoning": result.reasoning
             }
 
@@ -573,7 +636,7 @@ class DSPyRAGPipeline:
             return {
                 "is_sufficient": result.is_sufficient.lower() == "yes",
                 "has_ambiguity": result.has_ambiguity.lower() == "yes",
-                "confidence": float(result.confidence),
+                "confidence": self._safe_parse_confidence(result.confidence),
                 "ambiguity_type": result.ambiguity_type,
                 "clarification_hint": result.clarification_hint,
                 "reasoning": result.reasoning
@@ -737,7 +800,7 @@ class DSPyRAGPipeline:
             return {
                 "response": result.response,
                 "source_ids": source_ids,
-                "confidence": float(result.confidence),
+                "confidence": self._safe_parse_confidence(result.confidence),
                 "sources": retrieved_chunks
             }
         except Exception as e:

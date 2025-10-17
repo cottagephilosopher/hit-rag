@@ -20,6 +20,7 @@ class LLMConfig:
     # OpenAI 配置（可选）
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+    OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")  # OpenAI 兼容端点，如 XHub
 
     # DashScope 配置（阿里云灵积）
     DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")

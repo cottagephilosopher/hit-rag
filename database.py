@@ -838,6 +838,40 @@ def get_all_tags_with_stats() -> List[Dict[str, Any]]:
     )
 
 
+def get_content_tags_for_llm() -> List[str]:
+    """
+    获取用于LLM标签推理的标签列表（不包含文档级标签）
+
+    仅返回内容标签和预置标签，排除文档级标签（文件标签）。
+    这样可以避免chunk的内容标签与文档级标签混淆。
+
+    Returns:
+        标签名称列表（去重后）
+    """
+    # 获取所有标签统计
+    all_tags = get_all_tags_with_stats()
+
+    # 过滤出内容标签（排除纯文档级标签）
+    content_tag_names = set()
+    for tag in all_tags:
+        tag_type = tag.get('type', '')
+        # 只保留 user_tag, content_tag, multiple 类型
+        # 排除 document_tag（纯文档级标签）
+        if tag_type in ['user_tag', 'content_tag', 'multiple']:
+            content_tag_names.add(tag['name'])
+
+    # 添加预置标签
+    try:
+        from config import TagConfig
+        preset_tags = set(TagConfig.USER_DEFINED_TAGS)
+        content_tag_names.update(preset_tags)
+    except ImportError:
+        pass  # 如果无法导入配置，只使用数据库中的标签
+
+    # 返回排序后的列表
+    return sorted(list(content_tag_names))
+
+
 def delete_tag_from_all_chunks(tag_name: str) -> int:
     """
     从所有 chunks 中删除指定标签

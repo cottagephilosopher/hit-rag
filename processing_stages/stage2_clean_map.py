@@ -39,7 +39,9 @@ class Stage2CleanMap:
 
     def _fetch_system_tags(self) -> List[str]:
         """
-        从数据库直接获取系统现有标签
+        从数据库获取用于LLM标签推理的标签列表
+
+        仅返回内容标签和预置标签，排除文档级标签（文件标签）
 
         Returns:
             标签列表
@@ -48,17 +50,15 @@ class Stage2CleanMap:
             return self._cached_tags
 
         try:
-            # 直接从数据库获取标签（更可靠）
+            # 获取内容标签（排除文档级标签）
             try:
-                from database import get_all_tags_with_stats
+                from database import get_content_tags_for_llm
             except ImportError:
-                from ..database import get_all_tags_with_stats
+                from ..database import get_content_tags_for_llm
 
-            tags_data = get_all_tags_with_stats()
-            # 提取标签名称（去重）
-            tags = list(set(tag["name"] for tag in tags_data))
+            tags = get_content_tags_for_llm()
             self._cached_tags = tags
-            logger.info(f"✅ 从数据库获取了 {len(tags)} 个系统标签: {tags[:10]}...")
+            logger.info(f"✅ 从数据库获取了 {len(tags)} 个内容标签（已排除文档级标签）: {tags[:10]}...")
             return tags
 
         except Exception as e:
