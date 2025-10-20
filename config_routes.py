@@ -7,6 +7,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Optional
 import database as db
+import os
+from pathlib import Path
+from config import VectorConfig
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -31,6 +34,12 @@ class PromptUpdateRequest(BaseModel):
 class BatchPromptUpdateRequest(BaseModel):
     """批量提示词更新请求"""
     prompts: Dict[str, str]
+
+
+class SystemConfigUpdateRequest(BaseModel):
+    """系统配置更新请求"""
+    database_file: str
+    milvus_collection: str
 
 
 @router.get("/rag")
@@ -339,3 +348,161 @@ async def reset_prompt_configs():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置提示词配置失败: {str(e)}")
+
+
+# ============================================
+# 系统配置管理
+# ============================================
+
+@router.get("/system")
+async def get_system_config():
+    """
+    获取系统配置
+
+    返回:
+        - database_file: 数据库文件路径
+        - database_exists: 数据库文件是否存在
+        - milvus_collection: Milvus 集合名称
+    """
+    try:
+        # 从环境变量读取数据库文件路径
+        db_file = os.getenv("DB_FILE", ".dbs/rag_preprocessor.db")
+        db_path = Path(db_file)
+
+        # 检查数据库文件是否存在
+        database_exists = db_path.exists()
+
+        # 从配置读取 Milvus 集合名称
+        milvus_collection = VectorConfig.MILVUS_COLLECTION_NAME
+
+        return {
+            "database_file": str(db_path.absolute()),
+            "database_exists": database_exists,
+            "milvus_collection": milvus_collection
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取系统配置失败: {str(e)}")
+
+
+@router.put("/system")
+async def update_system_config(request: SystemConfigUpdateRequest):
+    """
+    更新系统配置
+
+    参数:
+        database_file: 数据库文件路径
+        milvus_collection: Milvus 集合名称
+
+    返回:
+        更新结果
+    """
+    try:
+        from dotenv import load_dotenv, set_key, find_dotenv
+
+        # 查找 .env 文件
+        env_file = find_dotenv()
+        if not env_file:
+            # 如果没有 .env 文件，创建一个
+            env_file = Path.cwd() / '.env'
+            env_file.touch()
+
+        env_path = Path(env_file)
+
+        # 更新 .env 文件
+        set_key(env_path, "DB_FILE", request.database_file)
+        set_key(env_path, "MILVUS_COLLECTION_NAME", request.milvus_collection)
+
+        # 检查数据库文件是否存在
+        db_path = Path(request.database_file)
+        db_exists = db_path.exists()
+
+        # 如果数据库不存在，自动创建
+        created_db = False
+        if not db_exists:
+            try:
+                # 确保目录存在
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # 初始化数据库
+                db.init_database()
+                created_db = True
+            except Exception as e:
+                print(f"警告：无法自动创建数据库: {e}")
+
+        message = "系统配置已保存到 .env 文件"
+        if created_db:
+            message += "，数据库已自动创建"
+        message += "。请重启服务以使配置生效。"
+
+        return {
+            "success": True,
+            "message": message,
+            "database_file": str(db_path.absolute()),
+            "milvus_collection": request.milvus_collection,
+            "database_created": created_db
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新系统配置失败: {str(e)}")
+
+
+@router.post("/system/create-database")
+async def create_database():
+    """
+    创建数据库（如果不存在）
+
+    返回:
+        创建结果
+    """
+    try:
+        db_file = os.getenv("DB_FILE", ".dbs/rag_preprocessor.db")
+        db_path = Path(db_file)
+
+        # 如果数据库已存在
+        if db_path.exists():
+            return {
+                "success": True,
+                "message": "数据库已存在",
+                "database_file": str(db_path.absolute())
+            }
+
+        # 确保目录存在
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 初始化数据库
+        db.init_database()
+
+        return {
+            "success": True,
+            "message": "数据库创建成功",
+            "database_file": str(db_path.absolute())
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"创建数据库失败: {str(e)}")
+
+
+@router.post("/system/initialize")
+async def initialize_system():
+    """
+    初始化系统
+
+    警告：此操作将删除所有数据！
+
+    返回:
+        初始化结果
+    """
+    try:
+        import init_system
+
+        # 调用初始化脚本中的函数
+        # 注意：这里直接调用初始化函数，跳过交互式确认（因为前端已经有确认）
+        success = init_system.init_sqlite_database(force=True)
+
+        if not success:
+            raise Exception("数据库初始化失败")
+
+        return {
+            "success": True,
+            "message": "系统初始化成功，所有数据已清空"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"系统初始化失败: {str(e)}")

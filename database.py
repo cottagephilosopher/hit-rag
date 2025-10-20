@@ -86,6 +86,13 @@ def init_database():
         with open(prompt_config_schema_file, 'r', encoding='utf-8') as f:
             prompt_config_schema_sql = f.read()
 
+    # 执行 OAuth 相关表的 schema
+    oauth_schema_file = Path(__file__).parent / ".dbs/oauth_schema.sql"
+    oauth_schema_sql = ""
+    if oauth_schema_file.exists():
+        with open(oauth_schema_file, 'r', encoding='utf-8') as f:
+            oauth_schema_sql = f.read()
+
     with _DB_LOCK:
         with get_connection() as conn:
             # 执行文档表 schema
@@ -99,6 +106,9 @@ def init_database():
             # 执行提示词配置表 schema（如果存在）
             if prompt_config_schema_sql:
                 conn.executescript(prompt_config_schema_sql)
+            # 执行 OAuth 表 schema（如果存在）
+            if oauth_schema_sql:
+                conn.executescript(oauth_schema_sql)
 
     print(f"✅ Database initialized at: {DB_FILE}")
 

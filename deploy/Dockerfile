@@ -13,7 +13,8 @@ RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debi
     sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
 
 # 安装系统依赖（apt 使用国内镜像，不需要代理）
-RUN apt-get update && apt-get install -y \
+RUN http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
+    apt-get update && apt-get install -y \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -28,10 +29,12 @@ COPY pyproject.toml uv.lock ./
 
 # 安装 Python 依赖（使用 BuildKit 缓存挂载大幅加速）
 # 缓存位置：/root/.cache/uv（uv 默认缓存目录）
-# 使用代理（如果提供）+ 清华镜像源
+# 使用代理（如果提供）+ 清华镜像源，增加超时时间
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    export http_proxy="${UV_HTTP_PROXY:-}" https_proxy="${UV_HTTPS_PROXY:-}" && \
-    uv sync --frozen --no-install-project --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    if [ -n "${UV_HTTP_PROXY}" ]; then \
+        export http_proxy="${UV_HTTP_PROXY}" https_proxy="${UV_HTTPS_PROXY}"; \
+    fi && \
+    UV_HTTP_TIMEOUT=120 uv sync --frozen --no-install-project --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 再复制项目文件（代码改动不会触发依赖重装）
 COPY . .

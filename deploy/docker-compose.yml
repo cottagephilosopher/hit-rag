@@ -31,6 +31,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        UV_HTTP_PROXY: ${HTTP_PROXY:-}
+        UV_HTTPS_PROXY: ${HTTPS_PROXY:-}
     container_name: hit-rag-backend
     environment:
       - MILVUS_HOST=milvus
@@ -40,11 +43,12 @@ services:
       - OUTPUT_DIR=/app/output
       - LOG_FILE=/app/logs/rag_preprocessor.log
       - DB_FILE=/app/.dbs/rag_preprocessor.db
+      - FILE_DIR=/files
     env_file:
       - ../.env
     volumes:
       # 映射 .env 配置文件
-      - ../.env:/app/.env:ro
+      - ../.env:/app/.env:rw
       # 映射文档目录（根据 .env 中的 ALL_MD_DIR 配置，这里使用相对路径示例）
       - ../../all-md:/app/all-md:rw
       # 映射日志目录
@@ -53,6 +57,8 @@ services:
       - ../.dbs:/app/.dbs
       # 映射输出目录
       - ../../output:/app/output:rw
+      # 映射文件上传目录
+      - ../../files:/files:rw
     ports:
       - "8086:8086"
     depends_on:

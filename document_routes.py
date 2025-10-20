@@ -47,9 +47,11 @@ from vector_db.vectorization_manager import VectorizationManager
 router = APIRouter()
 
 # ==================== 路径配置 ====================
-BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent.parent))
+BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent))
+FILE_DIR = Path(os.getenv("FILE_DIR", BASE_DIR / "files"))
 ALL_MD_DIR = Path(os.getenv("ALL_MD_DIR", BASE_DIR / "all-md"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", BASE_DIR / "hit-rag-ui" / "public" / "output"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", BASE_DIR / "output"))
+CONVERTED_DIR = Path(os.getenv("CONVERTED_DIR", FILE_DIR / "converted"))
 IKN_PLUS_DIR = Path(os.getenv("IKN_PLUS_DIR", Path(__file__).parent))
 
 # 存储处理任务状态
@@ -77,6 +79,7 @@ class Document(BaseModel):
     output_path: str | None = None
     processed_at: str | None = None
     error: str | None = None
+    source_file_type: str | None = None
 
 
 class ProcessRequest(BaseModel):
@@ -190,9 +193,84 @@ def get_output_path(filename: str) -> Path:
     return OUTPUT_DIR / f"{stem}_final_chunks.json"
 
 
+def get_source_file_type(filename: str) -> Optional[str]:
+    """从文件名或数据库推断源文件类型"""
+    # 对于 _converted.md 格式，查询数据库获取真实文件类型
+    if filename.endswith('_converted.md'):
+        try:
+            # 使用与 file_upload_routes.py 相同的数据库路径
+            import sqlite3
+            import os
+            from pathlib import Path
+
+            BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent.parent))
+            # 使用与 database.py 相同的数据库文件配置
+            DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
+
+            if not DB_PATH.exists():
+                pass  # 数据库不存在，跳过查询
+            else:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("""
+                    SELECT file_type FROM file_uploads
+                    WHERE converted_md_filename = ?
+                    LIMIT 1
+                """, (filename,)).fetchone()
+                conn.close()
+
+                if row:
+                    content_type = row['file_type'].lower()
+                    # 根据 MIME 类型映射到文件类型
+                    if 'pdf' in content_type:
+                        return 'PDF'
+                    elif 'word' in content_type or 'msword' in content_type or 'wordprocessing' in content_type:
+                        return 'Word'
+                    elif 'powerpoint' in content_type or 'presentation' in content_type:
+                        return 'PPT'
+                    elif 'excel' in content_type or 'spreadsheet' in content_type:
+                        return 'Excel'
+                    elif 'jpeg' in content_type or 'jpg' in content_type:
+                        return 'JPEG'
+                    elif 'png' in content_type:
+                        return 'PNG'
+                    elif 'image' in content_type:
+                        return 'Image'
+                    elif 'markdown' in content_type:
+                        return 'Markdown'
+        except Exception as e:
+            # 记录错误但不影响主流程
+            print(f"查询文件类型失败: {e}")
+            pass
+
+    # 对于其他格式，从文件名推断
+    import re
+    patterns = [
+        (r'\.pdf-[a-f0-9-]+\.md$', 'PDF'),
+        (r'\.docx?-[a-f0-9-]+\.md$', 'Word'),
+        (r'\.pptx?-[a-f0-9-]+\.md$', 'PPT'),
+        (r'\.xlsx?-[a-f0-9-]+\.md$', 'Excel'),
+        (r'\.jpe?g-[a-f0-9-]+\.md$', 'JPEG'),
+        (r'\.png-[a-f0-9-]+\.md$', 'PNG'),
+        (r'\.pdf\.md$', 'PDF'),
+        (r'\.docx?\.md$', 'Word'),
+        (r'\.pptx?\.md$', 'PPT'),
+        (r'\.xlsx?\.md$', 'Excel'),
+        (r'\.jpe?g\.md$', 'JPEG'),
+        (r'\.png\.md$', 'PNG'),
+    ]
+
+    for pattern, file_type in patterns:
+        if re.search(pattern, filename, re.IGNORECASE):
+            return file_type
+
+    return None
+
+
 def check_document_status(filename: str) -> Dict[str, Any]:
     """检查文档处理状态"""
     output_path = get_output_path(filename)
+    source_file_type = get_source_file_type(filename)
 
     if filename in processing_tasks:
         task_status = processing_tasks[filename]
@@ -200,14 +278,16 @@ def check_document_status(filename: str) -> Dict[str, Any]:
             return {
                 "filename": filename,
                 "status": "processing",
-                "output_path": None
+                "output_path": None,
+                "source_file_type": source_file_type
             }
         elif task_status["status"] == "error":
             return {
                 "filename": filename,
                 "status": "error",
                 "error": task_status.get("error"),
-                "output_path": None
+                "output_path": None,
+                "source_file_type": source_file_type
             }
 
     if output_path.exists():
@@ -219,20 +299,23 @@ def check_document_status(filename: str) -> Dict[str, Any]:
                 "filename": filename,
                 "status": "processed",
                 "output_path": f"./output/{output_path.name}",
-                "processed_at": processed_at
+                "processed_at": processed_at,
+                "source_file_type": source_file_type
             }
         except Exception as e:
             return {
                 "filename": filename,
                 "status": "error",
                 "error": f"读取输出文件失败: {str(e)}",
-                "output_path": None
+                "output_path": None,
+                "source_file_type": source_file_type
             }
 
     return {
         "filename": filename,
         "status": "not_processed",
-        "output_path": None
+        "output_path": None,
+        "source_file_type": source_file_type
     }
 
 
@@ -346,16 +429,300 @@ async def process_document(filename: str, background_tasks: BackgroundTasks):
 
 @router.delete("/api/documents/{filename}/output")
 async def delete_output(filename: str):
-    """删除文档的输出结果"""
-    output_path = get_output_path(filename)
+    """
+    删除选项1：删除切片数据
+    删除切片文件数据、数据库记录、向量数据（保留.md文件和原始上传文件）
+    """
+    md_path = ALL_MD_DIR / filename
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail=f"文档不存在: {filename}")
 
-    if output_path.exists():
-        output_path.unlink()
+    try:
+        # 1. 删除向量库中的数据
+        try:
+            doc = get_document_by_filename(filename)
+            if doc:
+                chunks = get_chunks_by_document(doc['id'])
+                if chunks:
+                    chunk_ids = [chunk['id'] for chunk in chunks]
+                    manager = get_vectorization_manager()
+                    manager.vector_store.delete_by_chunk_db_ids(chunk_ids)
+        except Exception as e:
+            print(f"删除向量数据时出错: {e}")
+
+        # 2. 删除数据库记录
+        try:
+            with get_connection() as conn:
+                # 删除文档级标签
+                conn.execute("DELETE FROM document_tags WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunk 日志
+                conn.execute("DELETE FROM chunk_logs WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunks
+                conn.execute("DELETE FROM document_chunks WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除文档记录
+                conn.execute("DELETE FROM documents WHERE filename = ?", (filename,))
+                conn.commit()
+        except Exception as e:
+            print(f"删除数据库记录时出错: {e}")
+
+        # 3. 删除输出文件
+        output_path = get_output_path(filename)
+        if output_path.exists():
+            output_path.unlink()
+
+        # 4. 清理处理任务状态
         if filename in processing_tasks:
             del processing_tasks[filename]
-        return {"message": f"已删除输出文件: {output_path.name}"}
-    else:
-        raise HTTPException(status_code=404, detail="输出文件不存在")
+
+        return {
+            "message": f"已删除切片数据: {filename}",
+            "deleted_items": {
+                "output_file": str(output_path) if output_path.exists() else None,
+                "database_records": True,
+                "vectors": True
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        error_detail = f"删除切片数据失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"删除切片数据失败: {str(e)}")
+
+
+@router.delete("/api/documents/{filename}")
+async def delete_md_file(filename: str):
+    """
+    删除选项2：删除.md文件
+    删除.md文件及其切片文件数据、数据库记录、向量数据（保留原始上传文件）
+    """
+    md_path = ALL_MD_DIR / filename
+
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail=f"文档不存在: {filename}")
+
+    try:
+        # 1. 删除向量库中的数据
+        try:
+            doc = get_document_by_filename(filename)
+            if doc:
+                chunks = get_chunks_by_document(doc['id'])
+                if chunks:
+                    chunk_ids = [chunk['id'] for chunk in chunks]
+                    manager = get_vectorization_manager()
+                    manager.vector_store.delete_by_chunk_db_ids(chunk_ids)
+        except Exception as e:
+            print(f"删除向量数据时出错: {e}")
+
+        # 2. 删除数据库记录
+        try:
+            with get_connection() as conn:
+                # 删除文档级标签
+                conn.execute("DELETE FROM document_tags WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunk 日志
+                conn.execute("DELETE FROM chunk_logs WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunks
+                conn.execute("DELETE FROM document_chunks WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除文档记录
+                conn.execute("DELETE FROM documents WHERE filename = ?", (filename,))
+                conn.commit()
+        except Exception as e:
+            print(f"删除数据库记录时出错: {e}")
+
+        # 3. 更新文件上传记录，清除MD文件关联
+        upload_record_updated = False
+        converted_md_path = None
+        try:
+            with get_connection() as conn:
+                upload_record = conn.execute(
+                    """
+                    SELECT id, converted_md_path
+                    FROM file_uploads
+                    WHERE converted_md_filename = ?
+                    LIMIT 1
+                    """,
+                    (filename,)
+                ).fetchone()
+
+                if upload_record:
+                    converted_md_path = upload_record["converted_md_path"]
+                    conn.execute(
+                        """
+                        UPDATE file_uploads
+                        SET converted_md_filename = NULL,
+                            converted_md_path = NULL,
+                            status = 'pending',
+                            mineru_task_id = NULL,
+                            conversion_started_at = NULL,
+                            conversion_completed_at = NULL,
+                            error_message = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (upload_record["id"],)
+                    )
+                    conn.commit()
+                    upload_record_updated = True
+        except Exception as e:
+            print(f"更新文件上传记录时出错: {e}")
+
+        # 4. 删除转换文件
+        converted_file_deleted_path = None
+        try:
+            candidate_paths = []
+            if converted_md_path:
+                candidate_paths.append(Path(converted_md_path))
+            candidate_paths.append(CONVERTED_DIR / filename)
+
+            for candidate in candidate_paths:
+                if not candidate:
+                    continue
+                if candidate.exists():
+                    candidate.unlink()
+                    converted_file_deleted_path = str(candidate)
+                    break
+        except Exception as e:
+            print(f"删除转换文件时出错: {e}")
+
+        # 5. 删除输出文件
+        output_path = get_output_path(filename)
+        output_file_deleted = False
+        if output_path.exists():
+            output_path.unlink()
+            output_file_deleted = True
+
+        # 6. 清理处理任务状态
+        if filename in processing_tasks:
+            del processing_tasks[filename]
+
+        # 7. 删除.md文件
+        md_path.unlink()
+
+        return {
+            "message": f"已删除.md文件及相关数据: {filename}",
+            "deleted_items": {
+                "md_file": str(md_path),
+                "converted_file": converted_file_deleted_path,
+                "output_file": str(output_path) if output_file_deleted else None,
+                "database_records": True,
+                "vectors": True,
+                "file_upload_record_updated": upload_record_updated
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        error_detail = f"删除.md文件失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"删除.md文件失败: {str(e)}")
+
+
+@router.delete("/api/documents/{filename}/complete")
+async def delete_completely(filename: str):
+    """
+    删除选项3：彻底删除
+    删除所有内容：原始上传文件、.md文件、切片数据、数据库记录、向量数据
+    """
+    md_path = ALL_MD_DIR / filename
+
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail=f"文档不存在: {filename}")
+
+    try:
+        deleted_items = {}
+
+        # 1. 删除向量库中的数据
+        try:
+            doc = get_document_by_filename(filename)
+            if doc:
+                chunks = get_chunks_by_document(doc['id'])
+                if chunks:
+                    chunk_ids = [chunk['id'] for chunk in chunks]
+                    manager = get_vectorization_manager()
+                    manager.vector_store.delete_by_chunk_db_ids(chunk_ids)
+            deleted_items["vectors"] = True
+        except Exception as e:
+            print(f"删除向量数据时出错: {e}")
+            deleted_items["vectors"] = False
+
+        # 2. 查找并删除原始上传文件
+        try:
+            import sqlite3
+            DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
+
+            if DB_PATH.exists():
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("""
+                    SELECT upload_path, converted_md_path
+                    FROM file_uploads
+                    WHERE converted_md_filename = ?
+                    LIMIT 1
+                """, (filename,)).fetchone()
+
+                if row:
+                    # 删除原始上传文件
+                    upload_path = Path(row['upload_path'])
+                    if upload_path.exists():
+                        upload_path.unlink()
+                        deleted_items["original_file"] = str(upload_path)
+
+                    # 删除 CONVERTED_DIR 中的转换文件
+                    if row['converted_md_path']:
+                        converted_path = Path(row['converted_md_path'])
+                        if converted_path.exists():
+                            converted_path.unlink()
+                            deleted_items["converted_file"] = str(converted_path)
+
+                    # 删除文件上传记录
+                    conn.execute("DELETE FROM file_uploads WHERE converted_md_filename = ?", (filename,))
+                    conn.commit()
+
+                conn.close()
+        except Exception as e:
+            print(f"删除原始文件时出错: {e}")
+
+        # 3. 删除数据库记录
+        try:
+            with get_connection() as conn:
+                # 删除文档级标签
+                conn.execute("DELETE FROM document_tags WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunk 日志
+                conn.execute("DELETE FROM chunk_logs WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除 chunks
+                conn.execute("DELETE FROM document_chunks WHERE document_id IN (SELECT id FROM documents WHERE filename = ?)", (filename,))
+                # 删除文档记录
+                conn.execute("DELETE FROM documents WHERE filename = ?", (filename,))
+                conn.commit()
+            deleted_items["database_records"] = True
+        except Exception as e:
+            print(f"删除数据库记录时出错: {e}")
+            deleted_items["database_records"] = False
+
+        # 4. 删除输出文件
+        output_path = get_output_path(filename)
+        if output_path.exists():
+            output_path.unlink()
+            deleted_items["output_file"] = str(output_path)
+
+        # 5. 清理处理任务状态
+        if filename in processing_tasks:
+            del processing_tasks[filename]
+
+        # 6. 删除.md文件
+        md_path.unlink()
+        deleted_items["md_file"] = str(md_path)
+
+        return {
+            "message": f"已彻底删除所有相关文件和数据: {filename}",
+            "deleted_items": deleted_items
+        }
+
+    except Exception as e:
+        import traceback
+        error_detail = f"彻底删除失败: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"彻底删除失败: {str(e)}")
 
 
 @router.get("/api/documents/{filename}/chunks")

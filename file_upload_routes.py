@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent))
 FILE_DIR = Path(os.getenv("FILE_DIR", BASE_DIR / "files"))
 ALL_MD_DIR = Path(os.getenv("ALL_MD_DIR", BASE_DIR / "all-md"))
-DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / ".dbs" / "hit-rag.db"))
+# 使用与 database.py 相同的数据库文件配置
+DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
 
 # 上传文件保存到 FILE_DIR/uploads 子目录
 UPLOAD_DIR = FILE_DIR / "uploads"
@@ -40,7 +41,7 @@ ALL_MD_DIR.mkdir(parents=True, exist_ok=True)
 MINERU_API_BASE = os.getenv("MINERU_API_BASE", "https://api.mineru.net")
 MINERU_API_KEY = os.getenv("MINERU_API_KEY", "")
 
-# 支持的文件格式（根据MinerU官方文档）
+# 支持的文件格式（根据MinerU官方文档 + Markdown）
 SUPPORTED_FILE_TYPES = {
     'application/pdf': '.pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
@@ -51,6 +52,8 @@ SUPPORTED_FILE_TYPES = {
     'application/vnd.ms-excel': '.xls',
     'image/jpeg': '.jpg',
     'image/png': '.png',
+    'text/markdown': '.md',
+    'text/plain': '.md',  # 有些浏览器会将 .md 识别为 text/plain
 }
 
 # ==================== Pydantic Models ====================
@@ -419,6 +422,68 @@ async def download_mineru_result(result_url: str, output_path: Path):
 
 # ==================== Background Tasks ====================
 
+async def process_markdown_file_directly(upload_id: int):
+    """
+    直接处理 Markdown 文件（跳过 MinerU 转换）
+    """
+    try:
+        record = get_file_upload_by_id(upload_id)
+        if not record:
+            logger.error(f"未找到上传记录: upload_id={upload_id}")
+            return
+
+        upload_path = Path(record['upload_path'])
+        if not upload_path.exists():
+            raise Exception(f"上传文件不存在: {upload_path}")
+
+        # 生成 MD 文件名
+        original_name = Path(record['original_filename']).stem
+        md_filename = f"{original_name}_converted.md"
+
+        # 复制到 CONVERTED_DIR
+        converted_path = CONVERTED_DIR / md_filename
+        shutil.copy2(upload_path, converted_path)
+
+        logger.info(f"Markdown 文件已复制到: {converted_path}")
+
+        # 处理图片URL（如果有的话）
+        try:
+            logger.info("开始处理Markdown中的图片...")
+            image_processor = create_image_processor()
+
+            # 将处理后的文件保存到 ALL_MD_DIR
+            md_path = ALL_MD_DIR / md_filename
+            success = image_processor.process_markdown_file(converted_path, md_path)
+
+            if success:
+                logger.info(f"图片处理完成，文件已保存到: {md_path}")
+                image_processor.print_stats()
+            else:
+                logger.warning("图片处理失败，复制原始文件到 ALL_MD_DIR")
+                shutil.copy2(converted_path, md_path)
+
+        except Exception as e:
+            logger.error(f"图片处理出错: {e}")
+            logger.warning("将使用原始文件")
+            # 如果图片处理失败，直接复制原文件
+            md_path = ALL_MD_DIR / md_filename
+            shutil.copy2(converted_path, md_path)
+
+        # 更新数据库状态为完成
+        update_file_upload_status(
+            upload_id,
+            'completed',
+            converted_md_filename=md_filename,
+            converted_md_path=str(converted_path)
+        )
+
+        logger.info(f"Markdown 文件处理完成: {md_filename}")
+
+    except Exception as e:
+        update_file_upload_status(upload_id, 'error', error_message=str(e))
+        logger.error(f"Markdown 文件处理失败 (upload_id={upload_id}): {e}")
+
+
 async def process_file_conversion(upload_id: int):
     """后台任务：处理文件转换"""
     try:
@@ -520,7 +585,7 @@ async def upload_file(
     """
     上传文件并触发MinerU转换
 
-    支持的文件类型：PDF, DOCX, PPTX, XLSX, JPG, PNG等
+    支持的文件类型：PDF, DOCX, PPTX, XLSX, JPG, PNG, MD等
     """
     try:
         # 检查文件类型
@@ -542,6 +607,9 @@ async def upload_file(
 
         file_size = len(content)
 
+        # 判断是否是 Markdown 文件
+        is_markdown = file_extension == '.md' or file.filename.endswith('.md')
+
         # 创建数据库记录
         upload_id = create_file_upload_record(
             original_filename=file.filename,
@@ -550,8 +618,12 @@ async def upload_file(
             upload_path=str(upload_path)
         )
 
-        # 启动后台转换任务
-        background_tasks.add_task(process_file_conversion, upload_id)
+        if is_markdown:
+            # Markdown 文件直接处理，跳过 MinerU 转换
+            background_tasks.add_task(process_markdown_file_directly, upload_id)
+        else:
+            # 其他文件启动 MinerU 转换任务
+            background_tasks.add_task(process_file_conversion, upload_id)
 
         record = get_file_upload_by_id(upload_id)
 
@@ -638,7 +710,7 @@ async def delete_upload(upload_id: int):
             if md_path.exists():
                 md_path.unlink()
 
-        # 删除数据库记录
+        # 删除数据库表记录
         with get_db_connection() as conn:
             conn.execute("DELETE FROM file_uploads WHERE id = ?", (upload_id,))
             conn.commit()
@@ -647,6 +719,85 @@ async def delete_upload(upload_id: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@router.api_route("/api/files/{filename:path}", methods=["GET", "HEAD"])
+async def get_original_file(filename: str, download: bool = False):
+    """
+    获取原始上传文件
+    根据.md文件名找到对应的原始文件
+
+    Args:
+        filename: MD文件名（例如: 应用编排平台技术文档_converted.md）
+        download: 是否作为附件下载，默认False（内联显示）
+
+    格式1: 原文件名.扩展名-UUID.md (例如: 1-AutoAgent介绍.pdf-40139b5b-2b54-4545-91c7-219e7258a821.md)
+    格式2: 原文件名_converted.md (例如: 文档解析验证维度 _converted.md)
+    """
+    from fastapi.responses import Response
+    from fastapi import Request
+
+    try:
+        logger.info(f"获取原文件请求: filename={filename}, download={download}")
+
+        if not filename.endswith('.md'):
+            raise HTTPException(status_code=400, detail="无效的文件名格式")
+
+        # 查找对应的文件上传记录
+        with get_db_connection() as conn:
+            # 根据converted_md_filename查找
+            row = conn.execute("""
+                SELECT * FROM file_uploads
+                WHERE converted_md_filename = ?
+                LIMIT 1
+            """, (filename,)).fetchone()
+
+            logger.info(f"数据库查询结果: {dict(row) if row else 'None'}")
+
+            if not row:
+                raise HTTPException(status_code=404, detail="未找到对应的原文件记录")
+
+            record = dict(row)
+            upload_path = Path(record['upload_path'])
+
+            if not upload_path.exists():
+                logger.error(f"原文件不存在: {upload_path}")
+                raise HTTPException(status_code=404, detail="原文件不存在")
+
+            logger.info(f"返回文件: {upload_path}")
+
+            # 读取文件内容
+            with open(upload_path, 'rb') as f:
+                file_content = f.read()
+
+            # 设置响应头
+            headers = {
+                'Content-Type': record['file_type'],
+            }
+
+            # 对文件名进行 URL 编码以支持中文文件名
+            from urllib.parse import quote
+            encoded_filename = quote(record['original_filename'])
+
+            # 根据 download 参数决定是内联显示还是下载
+            # 使用 RFC 5987 格式支持 UTF-8 文件名
+            if download:
+                headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+            else:
+                # 内联显示（在浏览器中打开）
+                headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
+
+            return Response(
+                content=file_content,
+                media_type=record['file_type'],
+                headers=headers
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取原文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取文件失败: {str(e)}")
 
 
 # 初始化数据库表

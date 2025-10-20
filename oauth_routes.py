@@ -1,0 +1,381 @@
+"""
+OAuth 第三方登录路由
+支持 GitHub、腾讯 QQ 等第三方平台登录
+"""
+
+import os
+import secrets
+import logging
+from datetime import datetime
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel
+import httpx
+
+from database import get_connection
+
+logger = logging.getLogger(__name__)
+
+# 创建路由器
+router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+
+# OAuth 配置
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+OAUTH_CALLBACK_BASE_URL = os.getenv("OAUTH_CALLBACK_BASE_URL", "http://localhost:8086")
+FRONTEND_URL = os.getenv("CHAT_UI_URL", "http://localhost:3000")
+
+
+# ==================== Pydantic Models ====================
+
+class OAuthCallbackRequest(BaseModel):
+    """OAuth 回调请求"""
+    code: str
+    state: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    """用户信息响应"""
+    id: int
+    username: Optional[str]
+    email: Optional[str]
+    avatar_url: Optional[str]
+    created_at: str
+
+
+# ==================== 数据库操作 ====================
+
+def get_or_create_user(
+    provider: str,
+    provider_user_id: str,
+    provider_username: str,
+    email: Optional[str] = None,
+    avatar_url: Optional[str] = None
+) -> dict:
+    """
+    获取或创建用户
+
+    Args:
+        provider: OAuth 提供商（github, qq 等）
+        provider_user_id: 第三方平台用户 ID
+        provider_username: 第三方平台用户名
+        email: 邮箱
+        avatar_url: 头像 URL
+
+    Returns:
+        用户信息字典
+    """
+    with get_connection() as conn:
+        # 查找是否已存在 OAuth 绑定
+        oauth_binding = conn.execute(
+            """
+            SELECT user_id FROM oauth_bindings
+            WHERE provider = ? AND provider_user_id = ?
+            """,
+            (provider, provider_user_id)
+        ).fetchone()
+
+        if oauth_binding:
+            # 已存在，获取用户信息
+            user_id = oauth_binding['user_id']
+            user = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+
+            if user:
+                # 更新最后登录时间
+                conn.execute(
+                    "UPDATE users SET last_login_at = ? WHERE id = ?",
+                    (datetime.utcnow(), user_id)
+                )
+                return dict(user)
+
+        # 创建新用户
+        cursor = conn.execute(
+            """
+            INSERT INTO users (username, email, avatar_url, last_login_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (provider_username, email, avatar_url, datetime.utcnow())
+        )
+        user_id = cursor.lastrowid
+
+        # 创建 OAuth 绑定
+        conn.execute(
+            """
+            INSERT INTO oauth_bindings (
+                user_id, provider, provider_user_id, provider_username
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (user_id, provider, provider_user_id, provider_username)
+        )
+
+        # 返回新创建的用户
+        user = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        return dict(user)
+
+
+def log_oauth_action(
+    provider: str,
+    action: str,
+    user_id: Optional[int] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    success: bool = True,
+    error_message: Optional[str] = None
+):
+    """
+    记录 OAuth 操作日志
+
+    Args:
+        provider: OAuth 提供商
+        action: 操作类型（login, bind, unbind）
+        user_id: 用户 ID
+        ip_address: 用户 IP
+        user_agent: User-Agent
+        success: 是否成功
+        error_message: 错误信息
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO oauth_logs (
+                user_id, provider, action, ip_address,
+                user_agent, success, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                provider,
+                action,
+                ip_address,
+                user_agent,
+                1 if success else 0,
+                error_message
+            )
+        )
+
+
+# ==================== GitHub OAuth ====================
+
+@router.get("/github/authorize")
+async def github_authorize():
+    """
+    GitHub OAuth 授权
+    生成授权 URL 并重定向
+    """
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="GitHub OAuth 未配置")
+
+    # 生成 state 用于防止 CSRF 攻击
+    state = secrets.token_urlsafe(32)
+
+    # 使用后端 API 地址作为回调地址
+    callback_uri = f"{OAUTH_CALLBACK_BASE_URL}/api/oauth/github"
+    authorize_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&redirect_uri={callback_uri}"
+        f"&scope=user:email"
+        f"&state={state}"
+    )
+
+    logger.info(f"GitHub OAuth 授权: state={state}, callback={callback_uri}")
+
+    return {
+        "authorize_url": authorize_url,
+        "state": state
+    }
+
+
+@router.get("/github")
+async def github_callback(code: str, state: Optional[str] = None, request: Request = None):
+    """
+    GitHub OAuth 回调处理
+    GitHub 授权后会跳转到这里，处理完成后重定向到前端
+
+    Args:
+        code: GitHub 返回的授权码
+        state: CSRF 防护状态码
+    """
+    try:
+        # 获取客户端 IP 和 User-Agent
+        ip_address = request.client.host if request else None
+        user_agent = request.headers.get("user-agent") if request else None
+
+        logger.info(f"GitHub OAuth 回调: code={code[:10]}..., state={state}")
+
+        if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+            raise HTTPException(status_code=500, detail="GitHub OAuth 未配置")
+
+        # 1. 用 code 换取 access_token
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": GITHUB_CLIENT_ID,
+                    "client_secret": GITHUB_CLIENT_SECRET,
+                    "code": code
+                },
+                timeout=30.0
+            )
+
+        if token_response.status_code != 200:
+            error_msg = f"获取 access_token 失败: {token_response.text}"
+            logger.error(error_msg)
+            log_oauth_action("github", "login", None, ip_address, user_agent, False, error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        token_data = token_response.json()
+        access_token = token_data.get("access_token")
+
+        if not access_token:
+            error_msg = f"未获取到 access_token: {token_data}"
+            logger.error(error_msg)
+            log_oauth_action("github", "login", None, ip_address, user_agent, False, error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        logger.info(f"✅ 获取 GitHub access_token 成功")
+
+        # 2. 用 access_token 获取用户信息
+        async with httpx.AsyncClient() as client:
+            user_response = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json"
+                },
+                timeout=30.0
+            )
+
+        if user_response.status_code != 200:
+            error_msg = f"获取用户信息失败: {user_response.text}"
+            logger.error(error_msg)
+            log_oauth_action("github", "login", None, ip_address, user_agent, False, error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        github_user = user_response.json()
+
+        logger.info(f"✅ 获取 GitHub 用户信息成功: {github_user.get('login')}")
+
+        # 3. 创建或获取本地用户
+        user = get_or_create_user(
+            provider="github",
+            provider_user_id=str(github_user["id"]),
+            provider_username=github_user.get("login"),
+            email=github_user.get("email"),
+            avatar_url=github_user.get("avatar_url")
+        )
+
+        logger.info(f"✅ 用户登录成功: user_id={user['id']}, username={user['username']}")
+
+        # 4. 记录登录日志
+        log_oauth_action(
+            provider="github",
+            action="login",
+            user_id=user["id"],
+            ip_address=ip_address,
+            user_agent=user_agent,
+            success=True
+        )
+
+        # 5. 重定向到前端，并携带用户信息
+        # 将用户信息编码到 URL 参数中（生产环境应使用 JWT）
+        import urllib.parse
+        user_data = {
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "avatar_url": user["avatar_url"]
+        }
+        user_json = urllib.parse.quote(str(user_data))
+
+        redirect_url = f"{FRONTEND_URL}/oauth/callback?success=true&user={user_json}&provider=github"
+
+        logger.info(f"✅ GitHub 登录成功，重定向到: {redirect_url}")
+
+        return RedirectResponse(url=redirect_url)
+
+    except HTTPException as http_exc:
+        # HTTP 异常，重定向到前端并携带错误信息
+        error_msg = str(http_exc.detail)
+        redirect_url = f"{FRONTEND_URL}/oauth/callback?success=false&error={urllib.parse.quote(error_msg)}&provider=github"
+        logger.error(f"❌ GitHub OAuth 失败: {error_msg}")
+        return RedirectResponse(url=redirect_url)
+    except Exception as e:
+        error_msg = f"GitHub OAuth 登录失败: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        log_oauth_action("github", "login", None, ip_address, user_agent, False, error_msg)
+
+        # 重定向到前端并携带错误信息
+        import urllib.parse
+        redirect_url = f"{FRONTEND_URL}/oauth/callback?success=false&error={urllib.parse.quote(error_msg)}&provider=github"
+        return RedirectResponse(url=redirect_url)
+
+
+# ==================== 用户信息 ====================
+
+@router.get("/user/{user_id}", response_model=UserResponse)
+async def get_user(user_id: int):
+    """
+    获取用户信息
+
+    Args:
+        user_id: 用户 ID
+    """
+    with get_connection() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        return UserResponse(**dict(user))
+
+
+@router.get("/user/{user_id}/bindings")
+async def get_user_bindings(user_id: int):
+    """
+    获取用户的 OAuth 绑定列表
+
+    Args:
+        user_id: 用户 ID
+    """
+    with get_connection() as conn:
+        bindings = conn.execute(
+            """
+            SELECT provider, provider_username, created_at
+            FROM oauth_bindings
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user_id,)
+        ).fetchall()
+
+        return {
+            "user_id": user_id,
+            "bindings": [dict(b) for b in bindings]
+        }
+
+
+# ==================== QQ OAuth（预留接口）====================
+
+@router.get("/qq/authorize")
+async def qq_authorize():
+    """QQ OAuth 授权（待实现）"""
+    raise HTTPException(status_code=501, detail="QQ OAuth 暂未实现")
+
+
+@router.get("/qq")
+async def qq_callback():
+    """QQ OAuth 回调（待实现）"""
+    raise HTTPException(status_code=501, detail="QQ OAuth 暂未实现")
