@@ -20,12 +20,13 @@ from image_uploader import create_image_processor
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# 导入统一的数据库连接
+from database import get_connection, get_db_file
+
 # ==================== 配置 ====================
 BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent))
 FILE_DIR = Path(os.getenv("FILE_DIR", BASE_DIR / "files"))
 ALL_MD_DIR = Path(os.getenv("ALL_MD_DIR", BASE_DIR / "all-md"))
-# 使用与 database.py 相同的数据库文件配置
-DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
 
 # 上传文件保存到 FILE_DIR/uploads 子目录
 UPLOAD_DIR = FILE_DIR / "uploads"
@@ -81,20 +82,14 @@ class FileUploadStatusResponse(BaseModel):
 
 # ==================== Database Functions ====================
 
-def get_db_connection():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def init_file_upload_table():
     """初始化文件上传表"""
-    schema_path = DB_PATH.parent / "file_upload_schema.sql"
+    db_file = get_db_file()
+    schema_path = db_file.parent / "file_upload_schema.sql"
     if not schema_path.exists():
         return
 
-    with get_db_connection() as conn:
+    with get_connection() as conn:
         with open(schema_path, 'r', encoding='utf-8') as f:
             conn.executescript(f.read())
 
@@ -106,7 +101,7 @@ def create_file_upload_record(
     upload_path: str
 ) -> int:
     """创建文件上传记录"""
-    with get_db_connection() as conn:
+    with get_connection() as conn:
         cursor = conn.execute("""
             INSERT INTO file_uploads (
                 original_filename, file_size, file_type, upload_path, status
@@ -125,7 +120,7 @@ def update_file_upload_status(
     error_message: Optional[str] = None
 ):
     """更新文件上传状态"""
-    with get_db_connection() as conn:
+    with get_connection() as conn:
         fields = ["status = ?"]
         params = [status]
 
@@ -161,7 +156,7 @@ def update_file_upload_status(
 
 def get_file_upload_by_id(upload_id: int) -> Optional[dict]:
     """根据ID获取文件上传记录"""
-    with get_db_connection() as conn:
+    with get_connection() as conn:
         row = conn.execute(
             "SELECT * FROM file_uploads WHERE id = ?",
             (upload_id,)
@@ -171,7 +166,7 @@ def get_file_upload_by_id(upload_id: int) -> Optional[dict]:
 
 def get_all_file_uploads(limit: int = 100) -> List[dict]:
     """获取所有文件上传记录"""
-    with get_db_connection() as conn:
+    with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM file_uploads ORDER BY created_at DESC LIMIT ?",
             (limit,)
@@ -711,7 +706,7 @@ async def delete_upload(upload_id: int):
                 md_path.unlink()
 
         # 删除数据库表记录
-        with get_db_connection() as conn:
+        with get_connection() as conn:
             conn.execute("DELETE FROM file_uploads WHERE id = ?", (upload_id,))
             conn.commit()
 
@@ -744,7 +739,7 @@ async def get_original_file(filename: str, download: bool = False):
             raise HTTPException(status_code=400, detail="无效的文件名格式")
 
         # 查找对应的文件上传记录
-        with get_db_connection() as conn:
+        with get_connection() as conn:
             # 根据converted_md_filename查找
             row = conn.execute("""
                 SELECT * FROM file_uploads

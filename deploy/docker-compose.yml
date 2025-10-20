@@ -32,8 +32,10 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       args:
-        UV_HTTP_PROXY: ${HTTP_PROXY:-}
-        UV_HTTPS_PROXY: ${HTTPS_PROXY:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     container_name: hit-rag-backend
     environment:
       - MILVUS_HOST=milvus
@@ -72,6 +74,8 @@ services:
       start_period: 40s
     restart: unless-stopped
     command: ["uv", "run", "python", "api_server.py"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - rag-network
 

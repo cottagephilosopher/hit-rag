@@ -33,8 +33,11 @@ def init_sqlite_database(force: bool = False):
     """初始化 SQLite 数据库"""
     print_step("初始化 SQLite 数据库")
 
-    # 数据库路径（从 .env 读取）
-    db_file = Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
+    # 导入统一的数据库连接
+    from database import get_db_file
+
+    # 数据库路径（使用统一的动态获取方法）
+    db_file = get_db_file()
     db_dir = db_file.parent
 
     # 创建目录
@@ -59,6 +62,7 @@ def init_sqlite_database(force: bool = False):
     rag_config_schema_file = db_dir / "rag_config_schema.sql"
     prompt_config_schema_file = db_dir / "prompt_config_schema.sql"
     file_upload_schema_file = db_dir / "file_upload_schema.sql"
+    oauth_schema_file = db_dir / "oauth_schema.sql"
 
     if not schema_file.exists():
         print(f"  ❌ Schema 文件不存在: {schema_file}")
@@ -103,6 +107,13 @@ def init_sqlite_database(force: bool = False):
                 file_upload_schema_sql = f.read()
             cursor.executescript(file_upload_schema_sql)
 
+        # 执行 OAuth schema（如果存在）
+        if oauth_schema_file.exists():
+            print_step("创建 OAuth 认证表", "")
+            with open(oauth_schema_file, 'r', encoding='utf-8') as f:
+                oauth_schema_sql = f.read()
+            cursor.executescript(oauth_schema_sql)
+
         conn.commit()
         conn.close()
 
@@ -115,6 +126,42 @@ def init_sqlite_database(force: bool = False):
         print_step("初始化提示词配置", "")
         from database import init_prompt_config_from_templates
         init_prompt_config_from_templates()
+
+        # 创建默认管理员账号
+        print_step("创建默认管理员账号", "")
+        from auth_utils import hash_password
+        from datetime import datetime
+
+        # 默认管理员信息（从环境变量读取，或使用默认值）
+        admin_username = os.getenv("ADMIN_USERNAME", "admin")
+        admin_password = os.getenv("ADMIN_PASSWORD", "1qaz")
+        admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
+
+        conn_temp = sqlite3.connect(db_file)
+        cursor_temp = conn_temp.cursor()
+
+        # 检查管理员是否已存在
+        existing_admin = cursor_temp.execute(
+            "SELECT id FROM users WHERE username = ?",
+            (admin_username,)
+        ).fetchone()
+
+        if not existing_admin:
+            password_hash = hash_password(admin_password)
+            cursor_temp.execute("""
+                INSERT INTO users (username, email, password_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (admin_username, admin_email, password_hash,
+                  datetime.utcnow().isoformat(), datetime.utcnow().isoformat()))
+            conn_temp.commit()
+            print(f"  ✅ 管理员账号创建成功")
+            print(f"     用户名: {admin_username}")
+            print(f"     密码: {admin_password}")
+            print(f"     ⚠️  请尽快修改默认密码！")
+        else:
+            print(f"  ⏭️  管理员账号已存在，跳过创建")
+
+        conn_temp.close()
 
         # 重新连接以验证
         conn = sqlite3.connect(db_file)

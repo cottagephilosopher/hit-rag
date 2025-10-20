@@ -98,8 +98,11 @@ async def root():
                 "tools": "GET /api/agent/tools",
                 "react": "POST /api/agent/react"
             },
-            # OAuth 登录
-            "oauth": {
+            # 认证与登录
+            "auth": {
+                "login": "POST /api/oauth/login",
+                "register": "POST /api/oauth/register",
+                "current_user": "GET /api/oauth/me",
                 "github_authorize": "GET /api/oauth/github/authorize",
                 "github_callback": "GET /api/oauth/github",
                 "user_info": "GET /api/oauth/user/{user_id}",

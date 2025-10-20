@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,                    -- 用户名（可选）
     email TEXT UNIQUE,                       -- 邮箱
+    password_hash TEXT,                      -- 密码哈希（用于用户名密码登录）
     avatar_url TEXT,                         -- 头像 URL
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

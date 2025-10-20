@@ -1,6 +1,6 @@
 """
-OAuth 第三方登录路由
-支持 GitHub、腾讯 QQ 等第三方平台登录
+统一认证路由
+支持用户名密码登录、GitHub OAuth、QQ OAuth 等多种登录方式
 """
 
 import os
@@ -8,12 +8,19 @@ import secrets
 import logging
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import httpx
 
 from database import get_connection
+from auth_utils import (
+    create_token_response,
+    authenticate_user,
+    decode_access_token,
+    hash_password
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +31,28 @@ router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 OAUTH_CALLBACK_BASE_URL = os.getenv("OAUTH_CALLBACK_BASE_URL", "http://localhost:8086")
-FRONTEND_URL = os.getenv("CHAT_UI_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_UI_URL", "http://localhost:3001")
+
+
+# 安全配置
+security = HTTPBearer()
 
 
 # ==================== Pydantic Models ====================
+
+class LoginRequest(BaseModel):
+    """用户名密码登录请求"""
+    username: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    """用户注册请求"""
+    username: str
+    email: str
+    password: str
+    avatar_url: Optional[str] = None
+
 
 class OAuthCallbackRequest(BaseModel):
     """OAuth 回调请求"""
@@ -42,6 +67,14 @@ class UserResponse(BaseModel):
     email: Optional[str]
     avatar_url: Optional[str]
     created_at: str
+
+
+class TokenResponse(BaseModel):
+    """Token 响应"""
+    access_token: str
+    token_type: str
+    expires_in: int
+    user: dict
 
 
 # ==================== 数据库操作 ====================
@@ -162,6 +195,153 @@ def log_oauth_action(
         )
 
 
+# ==================== Token 验证中间件 ====================
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """
+    验证 JWT token 并返回当前用户信息
+
+    Args:
+        credentials: HTTP Authorization Bearer token
+
+    Returns:
+        用户信息字典
+
+    Raises:
+        HTTPException: Token 无效或已过期
+    """
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Token 无效或已过期")
+
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token 格式错误")
+
+    # 从数据库获取用户信息
+    with get_connection() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(status_code=401, detail="用户不存在")
+
+        return dict(user)
+
+
+# ==================== 用户名密码登录 ====================
+
+@router.post("/login", response_model=TokenResponse)
+async def login(request: LoginRequest, req: Request):
+    """
+    用户名密码登录
+
+    Args:
+        request: 登录请求（用户名/邮箱 + 密码）
+        req: HTTP 请求对象
+
+    Returns:
+        JWT token 和用户信息
+    """
+    try:
+        # 获取客户端 IP 和 User-Agent
+        ip_address = req.client.host if req.client else None
+        user_agent = req.headers.get("user-agent", "")
+
+        logger.info(f"用户登录尝试: username={request.username}, ip={ip_address}")
+
+        # 验证用户名和密码
+        user = authenticate_user(request.username, request.password)
+
+        if not user:
+            logger.warning(f"登录失败: 用户名或密码错误 - {request.username}")
+            log_oauth_action("password", "login", None, ip_address, user_agent, False, "用户名或密码错误")
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+        # 记录登录日志
+        log_oauth_action("password", "login", user["id"], ip_address, user_agent, True)
+
+        logger.info(f"✅ 用户登录成功: user_id={user['id']}, username={user['username']}")
+
+        # 生成 JWT token
+        return create_token_response(user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"登录失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"登录失败: {str(e)}")
+
+
+@router.post("/register", response_model=TokenResponse)
+async def register(request: RegisterRequest, req: Request):
+    """
+    用户注册
+
+    Args:
+        request: 注册请求
+        req: HTTP 请求对象
+
+    Returns:
+        JWT token 和用户信息
+    """
+    try:
+        # 获取客户端 IP 和 User-Agent
+        ip_address = req.client.host if req.client else None
+        user_agent = req.headers.get("user-agent", "")
+
+        logger.info(f"用户注册尝试: username={request.username}, email={request.email}")
+
+        with get_connection() as conn:
+            # 检查用户名是否已存在
+            existing_user = conn.execute(
+                "SELECT id FROM users WHERE username = ? OR email = ?",
+                (request.username, request.email)
+            ).fetchone()
+
+            if existing_user:
+                raise HTTPException(status_code=400, detail="用户名或邮箱已存在")
+
+            # 加密密码
+            password_hash = hash_password(request.password)
+
+            # 创建用户
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, email, password_hash, avatar_url, last_login_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (request.username, request.email, password_hash, request.avatar_url, datetime.utcnow())
+            )
+            user_id = cursor.lastrowid
+
+            # 获取新创建的用户
+            user = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+
+            user = dict(user)
+
+        # 记录注册日志
+        log_oauth_action("password", "register", user["id"], ip_address, user_agent, True)
+
+        logger.info(f"✅ 用户注册成功: user_id={user['id']}, username={user['username']}")
+
+        # 生成 JWT token
+        return create_token_response(user)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"注册失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"注册失败: {str(e)}")
+
+
 # ==================== GitHub OAuth ====================
 
 @router.get("/github/authorize")
@@ -224,7 +404,7 @@ async def github_callback(code: str, state: Optional[str] = None, request: Reque
                     "client_secret": GITHUB_CLIENT_SECRET,
                     "code": code
                 },
-                timeout=30.0
+                timeout=60.0  # 增加超时时间到 60 秒
             )
 
         if token_response.status_code != 200:
@@ -252,7 +432,7 @@ async def github_callback(code: str, state: Optional[str] = None, request: Reque
                     "Authorization": f"Bearer {access_token}",
                     "Accept": "application/json"
                 },
-                timeout=30.0
+                timeout=60.0  # 增加超时时间到 60 秒
             )
 
         if user_response.status_code != 200:
@@ -286,18 +466,23 @@ async def github_callback(code: str, state: Optional[str] = None, request: Reque
             success=True
         )
 
-        # 5. 重定向到前端，并携带用户信息
-        # 将用户信息编码到 URL 参数中（生产环境应使用 JWT）
-        import urllib.parse
-        user_data = {
-            "id": user["id"],
-            "username": user["username"],
-            "email": user["email"],
-            "avatar_url": user["avatar_url"]
-        }
-        user_json = urllib.parse.quote(str(user_data))
+        # 5. 生成 JWT token
+        token_data = create_token_response(user)
 
-        redirect_url = f"{FRONTEND_URL}/oauth/callback?success=true&user={user_json}&provider=github"
+        # 6. 重定向到前端，并携带 token 和用户信息
+        import urllib.parse
+        import json
+
+        # 将用户信息编码为 JSON 字符串
+        user_json = json.dumps(token_data['user'])
+
+        redirect_url = (
+            f"{FRONTEND_URL}/oauth/callback"
+            f"?success=true"
+            f"&token={token_data['access_token']}"
+            f"&user={urllib.parse.quote(user_json)}"
+            f"&provider=github"
+        )
 
         logger.info(f"✅ GitHub 登录成功，重定向到: {redirect_url}")
 
@@ -321,6 +506,27 @@ async def github_callback(code: str, state: Optional[str] = None, request: Reque
 
 
 # ==================== 用户信息 ====================
+
+@router.get("/me")
+async def get_current_user_info(current_user: dict = Depends(get_current_user)):
+    """
+    获取当前登录用户的信息（需要 JWT token）
+
+    Args:
+        current_user: 当前用户（通过 JWT token 验证）
+
+    Returns:
+        用户信息
+    """
+    return {
+        "id": current_user["id"],
+        "username": current_user.get("username"),
+        "email": current_user.get("email"),
+        "avatar_url": current_user.get("avatar_url"),
+        "created_at": current_user.get("created_at"),
+        "last_login_at": current_user.get("last_login_at")
+    }
+
 
 @router.get("/user/{user_id}", response_model=UserResponse)
 async def get_user(user_id: int):

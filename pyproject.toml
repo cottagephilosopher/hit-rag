@@ -17,7 +17,7 @@ dependencies = [
     "langchain-core>=0.3.0",
     "pymilvus>=2.4.0",
     "numpy>=1.24.0",
-    "httpx>=0.28.1",
+    "httpx[socks]>=0.28.1",
     "python-dotenv>=1.1.1",
     "dspy-ai>=3.0.3",
     "dspy>=3.0.3",
@@ -25,4 +25,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "aiohttp>=3.13.0",
     "tos>=2.8.7",
+    "pyjwt>=2.10.1",
+    "bcrypt>=4.0.0",
+    "passlib>=1.7.4",
 ]

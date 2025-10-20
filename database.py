@@ -16,11 +16,21 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
-# 数据库文件路径
-DB_FILE = Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
-
 # 数据库锁（用于并发控制）
 _DB_LOCK = threading.Lock()
+
+
+def get_db_file() -> Path:
+    """
+    动态获取数据库文件路径
+    支持运行时通过修改环境变量来切换数据库
+
+    Returns:
+        数据库文件的 Path 对象
+    """
+    # 每次调用都重新读取环境变量，确保能获取到最新配置
+    load_dotenv(override=True)
+    return Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
 
 
 def _json_dump(obj: Any) -> str:
@@ -42,8 +52,15 @@ def _json_load(text: Optional[str]) -> Any:
 
 @contextmanager
 def get_connection():
-    """获取数据库连接（上下文管理器）"""
-    conn = sqlite3.connect(DB_FILE)
+    """
+    获取数据库连接（上下文管理器）
+    动态读取数据库路径，支持运行时配置修改
+
+    Yields:
+        sqlite3.Connection: 数据库连接对象
+    """
+    db_file = get_db_file()  # 动态获取数据库路径
+    conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row  # 返回字典格式
     try:
         yield conn
@@ -57,6 +74,8 @@ def get_connection():
 
 def init_database():
     """初始化数据库（创建表和索引）"""
+    db_file = get_db_file()  # 动态获取数据库路径
+
     # 执行文档相关表的 schema
     schema_file = Path(__file__).parent / ".dbs/schema.sql"
     if not schema_file.exists():
@@ -110,7 +129,7 @@ def init_database():
             if oauth_schema_sql:
                 conn.executescript(oauth_schema_sql)
 
-    print(f"✅ Database initialized at: {DB_FILE}")
+    print(f"✅ Database initialized at: {db_file}")
 
 
 # ============================================

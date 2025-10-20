@@ -365,9 +365,8 @@ async def get_system_config():
         - milvus_collection: Milvus 集合名称
     """
     try:
-        # 从环境变量读取数据库文件路径
-        db_file = os.getenv("DB_FILE", ".dbs/rag_preprocessor.db")
-        db_path = Path(db_file)
+        # 使用统一的数据库路径获取方法
+        db_path = db.get_db_file()
 
         # 检查数据库文件是否存在
         database_exists = db_path.exists()
@@ -454,8 +453,8 @@ async def create_database():
         创建结果
     """
     try:
-        db_file = os.getenv("DB_FILE", ".dbs/rag_preprocessor.db")
-        db_path = Path(db_file)
+        # 使用统一的数据库路径获取方法
+        db_path = db.get_db_file()
 
         # 如果数据库已存在
         if db_path.exists():

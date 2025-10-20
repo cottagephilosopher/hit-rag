@@ -3,17 +3,16 @@
 负责对话会话的创建、存储、检索和上下文管理
 """
 
-import sqlite3
 import uuid
 import json
-import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from pathlib import Path
-from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv()
+# 导入统一的数据库连接
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from database import get_connection
 
 
 class ConversationManager:
@@ -24,17 +23,14 @@ class ConversationManager:
         初始化对话管理器
 
         Args:
-            db_path: 数据库路径，默认从 .env 的 DB_FILE 获取
+            db_path: 已废弃，保留仅为兼容性，实际使用统一的数据库连接
         """
-        if db_path is None:
-            db_path = Path(os.getenv("DB_FILE", ".dbs/rag_preprocessor.db"))
-        self.db_path = str(db_path)
+        # db_path 参数已废弃，使用 database.get_connection() 动态获取
+        pass
 
     def _get_connection(self):
-        """获取数据库连接"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        """获取数据库连接（使用统一的连接管理）"""
+        return get_connection()
 
     def create_session(self, metadata: Dict[str, Any] = None) -> str:
         """

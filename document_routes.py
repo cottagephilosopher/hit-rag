@@ -198,26 +198,13 @@ def get_source_file_type(filename: str) -> Optional[str]:
     # 对于 _converted.md 格式，查询数据库获取真实文件类型
     if filename.endswith('_converted.md'):
         try:
-            # 使用与 file_upload_routes.py 相同的数据库路径
-            import sqlite3
-            import os
-            from pathlib import Path
-
-            BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent.parent))
-            # 使用与 database.py 相同的数据库文件配置
-            DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
-
-            if not DB_PATH.exists():
-                pass  # 数据库不存在，跳过查询
-            else:
-                conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row
+            # 使用统一的数据库连接
+            with get_connection() as conn:
                 row = conn.execute("""
                     SELECT file_type FROM file_uploads
                     WHERE converted_md_filename = ?
                     LIMIT 1
                 """, (filename,)).fetchone()
-                conn.close()
 
                 if row:
                     content_type = row['file_type'].lower()
@@ -647,12 +634,8 @@ async def delete_completely(filename: str):
 
         # 2. 查找并删除原始上传文件
         try:
-            import sqlite3
-            DB_PATH = Path(os.getenv("DB_FILE", BASE_DIR / ".dbs" / "rag_preprocessor.db"))
-
-            if DB_PATH.exists():
-                conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row
+            # 使用统一的数据库连接
+            with get_connection() as conn:
                 row = conn.execute("""
                     SELECT upload_path, converted_md_path
                     FROM file_uploads
