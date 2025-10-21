@@ -73,10 +73,30 @@ check_docker() {
 
 # 检查 docker-compose 文件
 check_compose_file() {
-    if [ ! -f "docker-compose.yml" ]; then
-        log_error "未找到 docker-compose.yml 文件，请在 deploy 目录下运行此脚本"
+    # 检测系统类型并选择合适的 compose 文件
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux 系统，检查是否是 Ubuntu
+        if command -v lsb_release >/dev/null 2>&1; then
+            if lsb_release -d | grep -q "Ubuntu"; then
+                COMPOSE_FILE="docker-compose.ubuntu.yml"
+                log_info "检测到 Ubuntu 系统，使用 Ubuntu 专用配置"
+            else
+                COMPOSE_FILE="docker-compose.yml"
+            fi
+        else
+            COMPOSE_FILE="docker-compose.yml"
+        fi
+    else
+        # macOS 或其他系统
+        COMPOSE_FILE="docker-compose.yml"
+    fi
+    
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        log_error "未找到 $COMPOSE_FILE 文件，请在 deploy 目录下运行此脚本"
         exit 1
     fi
+    
+    log_info "使用 compose 文件: $COMPOSE_FILE"
 }
 
 # 构建 Docker 镜像
@@ -113,9 +133,9 @@ build_image() {
     
     # 执行构建
     log_info "开始构建 Docker 镜像..."
-    echo "构建命令: docker compose build $build_args $extra_args"
+    echo "构建命令: docker compose -f $COMPOSE_FILE build $build_args $extra_args"
     
-    if docker compose build $build_args $extra_args; then
+    if docker compose -f $COMPOSE_FILE build $build_args $extra_args; then
         log_success "Docker 镜像构建完成"
     else
         log_error "Docker 镜像构建失败"
@@ -127,15 +147,15 @@ build_image() {
 start_services() {
     if [ "$DAEMON_MODE" = "true" ]; then
         log_info "后台启动服务..."
-        docker compose up -d
+        docker compose -f $COMPOSE_FILE up -d
         log_success "服务已在后台启动"
         echo ""
-        echo "查看服务状态: docker compose ps"
-        echo "查看日志: docker compose logs -f"
-        echo "停止服务: docker compose down"
+        echo "查看服务状态: docker compose -f $COMPOSE_FILE ps"
+        echo "查看日志: docker compose -f $COMPOSE_FILE logs -f"
+        echo "停止服务: docker compose -f $COMPOSE_FILE down"
     else
         log_info "启动服务..."
-        docker compose up
+        docker compose -f $COMPOSE_FILE up
     fi
 }
 
@@ -144,7 +164,7 @@ clean_cache() {
     log_info "清理 Docker 缓存..."
     
     # 停止并删除容器
-    docker compose down --remove-orphans 2>/dev/null || true
+    docker compose -f $COMPOSE_FILE down --remove-orphans 2>/dev/null || true
     
     # 删除构建缓存
     docker builder prune -f 2>/dev/null || true

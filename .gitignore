@@ -5,6 +5,7 @@ __pycache__/
 deploy/uv
 SETUP.md
 # C extensions
+.env.server
 *.so
 .dbs/*.db
 # Distribution / packaging

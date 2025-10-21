@@ -18,6 +18,24 @@ PROXY_HOST="host.docker.internal"
 PROXY_PORT="7897"
 INDEX_URL="https://pypi.org/simple"
 
+# 检测系统类型并选择合适的 compose 文件
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    # Linux 系统，检查是否是 Ubuntu
+    if command -v lsb_release >/dev/null 2>&1; then
+        if lsb_release -d | grep -q "Ubuntu"; then
+            COMPOSE_FILE="docker-compose.ubuntu.yml"
+            echo "检测到 Ubuntu 系统，使用 Ubuntu 专用配置"
+        else
+            COMPOSE_FILE="docker-compose.yml"
+        fi
+    else
+        COMPOSE_FILE="docker-compose.yml"
+    fi
+else
+    # macOS 或其他系统
+    COMPOSE_FILE="docker-compose.yml"
+fi
+
 # 解析参数
 USE_PROXY=false
 USE_TSINGHUA=false
@@ -85,7 +103,7 @@ if [ "$CLEAN_BUILD" = "true" ]; then
 fi
 
 # 构建命令
-BUILD_CMD="docker compose build"
+BUILD_CMD="docker compose -f $COMPOSE_FILE build"
 
 # 添加代理参数
 if [ "$USE_PROXY" = "true" ]; then
@@ -118,10 +136,10 @@ fi
 if [ "$START_AFTER_BUILD" = "true" ]; then
     echo ""
     echo "🚀 启动服务..."
-    docker compose up -d
+    docker compose -f $COMPOSE_FILE up -d
     echo -e "${GREEN}✅ 服务已启动！${NC}"
     echo ""
-    echo "查看状态: docker compose ps"
-    echo "查看日志: docker compose logs -f"
-    echo "停止服务: docker compose down"
+    echo "查看状态: docker compose -f $COMPOSE_FILE ps"
+    echo "查看日志: docker compose -f $COMPOSE_FILE logs -f"
+    echo "停止服务: docker compose -f $COMPOSE_FILE down"
 fi
