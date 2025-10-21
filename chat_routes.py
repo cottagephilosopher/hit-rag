@@ -17,7 +17,7 @@ from vector_db.vectorization_manager import VectorizationManager
 logger = logging.getLogger(__name__)
 
 # 创建路由器
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter()
 
 # 全局实例（懒加载）
 conversation_manager = None
@@ -90,7 +90,7 @@ class SessionInfo(BaseModel):
 
 # ==================== API Routes ====================
 
-@router.post("/message/stream")
+@router.post("/api/chat/message/stream")
 async def send_message_stream(request: ChatMessageRequest):
     """
     发送消息并获取流式回复（SSE）
@@ -200,7 +200,7 @@ async def send_message_stream(request: ChatMessageRequest):
         raise HTTPException(status_code=500, detail=f"流式消息处理失败: {str(e)}")
 
 
-@router.post("/message", response_model=ChatMessageResponse)
+@router.post("/api/chat/message", response_model=ChatMessageResponse)
 async def send_message(request: ChatMessageRequest):
     """
     发送消息并获取回复
@@ -357,7 +357,7 @@ async def send_message(request: ChatMessageRequest):
         raise HTTPException(status_code=500, detail=f"消息处理失败: {str(e)}")
 
 
-@router.get("/sessions/{session_id}/history", response_model=ChatHistoryResponse)
+@router.get("/api/chat/sessions/{session_id}/history", response_model=ChatHistoryResponse)
 async def get_history(session_id: str, limit: int = 20):
     """获取对话历史"""
     try:
@@ -383,7 +383,7 @@ async def get_history(session_id: str, limit: int = 20):
         raise HTTPException(status_code=500, detail=f"获取历史失败: {str(e)}")
 
 
-@router.delete("/sessions/{session_id}")
+@router.delete("/api/chat/sessions/{session_id}")
 async def delete_session(session_id: str):
     """删除会话"""
     try:
@@ -409,7 +409,7 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=500, detail=f"删除会话失败: {str(e)}")
 
 
-@router.get("/sessions", response_model=List[SessionInfo])
+@router.get("/api/chat/sessions", response_model=List[SessionInfo])
 async def list_sessions(limit: int = 10):
     """获取活跃会话列表"""
     try:
@@ -423,7 +423,7 @@ async def list_sessions(limit: int = 10):
         raise HTTPException(status_code=500, detail=f"获取会话列表失败: {str(e)}")
 
 
-@router.post("/sessions/{session_id}/archive")
+@router.post("/api/chat/sessions/{session_id}/archive")
 async def archive_session(session_id: str):
     """归档会话"""
     try:

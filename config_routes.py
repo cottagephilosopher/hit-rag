@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from config import VectorConfig
 
-router = APIRouter(prefix="/api/config", tags=["config"])
+router = APIRouter()
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -42,7 +42,7 @@ class SystemConfigUpdateRequest(BaseModel):
     milvus_collection: str
 
 
-@router.get("/rag")
+@router.get("/api/config/rag")
 async def get_rag_configs(config_key: Optional[str] = None):
     """
     获取 RAG 配置
@@ -79,7 +79,7 @@ async def get_rag_configs(config_key: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"获取配置失败: {str(e)}")
 
 
-@router.put("/rag")
+@router.put("/api/config/rag")
 async def update_rag_config(request: ConfigUpdateRequest):
     """
     更新单个 RAG 配置项
@@ -132,7 +132,7 @@ async def update_rag_config(request: ConfigUpdateRequest):
         raise HTTPException(status_code=500, detail=f"更新配置失败: {str(e)}")
 
 
-@router.put("/rag/batch")
+@router.put("/api/config/rag/batch")
 async def batch_update_rag_configs(request: BatchConfigUpdateRequest):
     """
     批量更新 RAG 配置
@@ -182,7 +182,7 @@ async def batch_update_rag_configs(request: BatchConfigUpdateRequest):
         raise HTTPException(status_code=500, detail=f"批量更新配置失败: {str(e)}")
 
 
-@router.post("/rag/reset")
+@router.post("/api/config/rag/reset")
 async def reset_rag_configs():
     """
     重置所有 RAG 配置为默认值
@@ -212,7 +212,7 @@ async def reset_rag_configs():
 # 提示词配置管理
 # ============================================
 
-@router.get("/prompts")
+@router.get("/api/config/prompts")
 async def get_prompt_configs(prompt_key: Optional[str] = None):
     """
     获取提示词配置
@@ -249,7 +249,7 @@ async def get_prompt_configs(prompt_key: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"获取提示词配置失败: {str(e)}")
 
 
-@router.put("/prompts")
+@router.put("/api/config/prompts")
 async def update_prompt_config(request: PromptUpdateRequest):
     """
     更新单个提示词配置项
@@ -285,7 +285,7 @@ async def update_prompt_config(request: PromptUpdateRequest):
         raise HTTPException(status_code=500, detail=f"更新提示词配置失败: {str(e)}")
 
 
-@router.put("/prompts/batch")
+@router.put("/api/config/prompts/batch")
 async def batch_update_prompt_configs(request: BatchPromptUpdateRequest):
     """
     批量更新提示词配置
@@ -324,7 +324,7 @@ async def batch_update_prompt_configs(request: BatchPromptUpdateRequest):
         raise HTTPException(status_code=500, detail=f"批量更新提示词配置失败: {str(e)}")
 
 
-@router.post("/prompts/reset")
+@router.post("/api/config/prompts/reset")
 async def reset_prompt_configs():
     """
     重置所有提示词配置为默认值
@@ -354,7 +354,7 @@ async def reset_prompt_configs():
 # 系统配置管理
 # ============================================
 
-@router.get("/system")
+@router.get("/api/config/system")
 async def get_system_config():
     """
     获取系统配置
@@ -383,7 +383,7 @@ async def get_system_config():
         raise HTTPException(status_code=500, detail=f"获取系统配置失败: {str(e)}")
 
 
-@router.put("/system")
+@router.put("/api/config/system")
 async def update_system_config(request: SystemConfigUpdateRequest):
     """
     更新系统配置
@@ -444,7 +444,7 @@ async def update_system_config(request: SystemConfigUpdateRequest):
         raise HTTPException(status_code=500, detail=f"更新系统配置失败: {str(e)}")
 
 
-@router.post("/system/create-database")
+@router.post("/api/config/system/create-database")
 async def create_database():
     """
     创建数据库（如果不存在）
@@ -479,7 +479,7 @@ async def create_database():
         raise HTTPException(status_code=500, detail=f"创建数据库失败: {str(e)}")
 
 
-@router.post("/system/initialize")
+@router.post("/api/config/system/initialize")
 async def initialize_system():
     """
     初始化系统

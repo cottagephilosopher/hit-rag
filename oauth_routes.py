@@ -25,7 +25,7 @@ from auth_utils import (
 logger = logging.getLogger(__name__)
 
 # 创建路由器
-router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+router = APIRouter()
 
 # OAuth 配置
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
@@ -235,7 +235,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 # ==================== 用户名密码登录 ====================
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/api/oauth/login", response_model=TokenResponse)
 async def login(request: LoginRequest, req: Request):
     """
     用户名密码登录
@@ -277,7 +277,7 @@ async def login(request: LoginRequest, req: Request):
         raise HTTPException(status_code=500, detail=f"登录失败: {str(e)}")
 
 
-@router.post("/register", response_model=TokenResponse)
+@router.post("/api/oauth/register", response_model=TokenResponse)
 async def register(request: RegisterRequest, req: Request):
     """
     用户注册
@@ -344,7 +344,7 @@ async def register(request: RegisterRequest, req: Request):
 
 # ==================== GitHub OAuth ====================
 
-@router.get("/github/authorize")
+@router.get("/api/oauth/github/authorize")
 async def github_authorize():
     """
     GitHub OAuth 授权
@@ -374,7 +374,7 @@ async def github_authorize():
     }
 
 
-@router.get("/github")
+@router.get("/api/oauth/github")
 async def github_callback(code: str, state: Optional[str] = None, request: Request = None):
     """
     GitHub OAuth 回调处理
@@ -507,7 +507,7 @@ async def github_callback(code: str, state: Optional[str] = None, request: Reque
 
 # ==================== 用户信息 ====================
 
-@router.get("/me")
+@router.get("/api/oauth/me")
 async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     """
     获取当前登录用户的信息（需要 JWT token）
@@ -528,7 +528,7 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     }
 
 
-@router.get("/user/{user_id}", response_model=UserResponse)
+@router.get("/api/oauth/user/{user_id}", response_model=UserResponse)
 async def get_user(user_id: int):
     """
     获取用户信息
@@ -548,7 +548,7 @@ async def get_user(user_id: int):
         return UserResponse(**dict(user))
 
 
-@router.get("/user/{user_id}/bindings")
+@router.get("/api/oauth/user/{user_id}/bindings")
 async def get_user_bindings(user_id: int):
     """
     获取用户的 OAuth 绑定列表
@@ -575,13 +575,13 @@ async def get_user_bindings(user_id: int):
 
 # ==================== QQ OAuth（预留接口）====================
 
-@router.get("/qq/authorize")
+@router.get("/api/oauth/qq/authorize")
 async def qq_authorize():
     """QQ OAuth 授权（待实现）"""
     raise HTTPException(status_code=501, detail="QQ OAuth 暂未实现")
 
 
-@router.get("/qq")
+@router.get("/api/oauth/qq")
 async def qq_callback():
     """QQ OAuth 回调（待实现）"""
     raise HTTPException(status_code=501, detail="QQ OAuth 暂未实现")
