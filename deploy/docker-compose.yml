@@ -54,7 +54,7 @@ services:
       # 映射文档目录（根据 .env 中的 ALL_MD_DIR 配置，这里使用相对路径示例）
       - ../../all-md:/app/all-md:rw
       # 映射日志目录
-      - ../../logs:/app/logs
+      - ../../logs:/app/logs:rw
       # 映射数据库文件
       - ../.dbs:/app/.dbs
       # 映射输出目录
@@ -62,12 +62,12 @@ services:
       # 映射文件上传目录
       - ../../files:/files:rw
     ports:
-      - "8086:8086"
+      - "${API_PORT:-8086}:${API_PORT:-8086}"
     depends_on:
       milvus:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8086/api/assistants"]
+      test: ["CMD", "curl", "-f", "http://localhost:${API_PORT:-8086}/api/assistants"]
       interval: 30s
       timeout: 10s
       retries: 3

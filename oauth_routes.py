@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 # OAuth 配置
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
-OAUTH_CALLBACK_BASE_URL = os.getenv("OAUTH_CALLBACK_BASE_URL", "http://localhost:8086")
+OAUTH_CALLBACK_BASE_URL = os.getenv("OAUTH_CALLBACK_BASE_URL", f"http://localhost:{os.getenv('API_PORT', '8086')}")
 FRONTEND_URL = os.getenv("FRONTEND_UI_URL", "http://localhost:3001")
 
 

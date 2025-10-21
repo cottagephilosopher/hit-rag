@@ -56,8 +56,8 @@ ENV HTTP_PROXY= \
     https_proxy= \
     no_proxy=
 
-# 暴露端口
-EXPOSE 8086
+# 暴露端口（通过环境变量配置）
+EXPOSE ${API_PORT:-8086}
 
 # 默认命令
 CMD ["uv", "run", "python", "api_server.py"]

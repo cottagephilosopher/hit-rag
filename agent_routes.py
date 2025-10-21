@@ -207,7 +207,7 @@ async def agent_react(request: AgentReactRequest):
                 await asyncio.sleep(0.05)
 
                 # 发送文件源信息（使用 files 类型）
-                api_base_url = os.getenv("API_BASE_URL", "http://localhost:8086")
+                api_base_url = os.getenv("API_BASE_URL", f"http://localhost:{os.getenv('API_PORT', '8086')}")
 
                 for i, source in enumerate(sources[:5]):  # 最多显示5个来源
                     doc_name = source.get('document', f'文档{i+1}')

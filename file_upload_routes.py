@@ -464,6 +464,17 @@ async def process_markdown_file_directly(upload_id: int):
             md_path = ALL_MD_DIR / md_filename
             shutil.copy2(converted_path, md_path)
 
+        # ⭐ 关键新增: 自动触发文档处理（解析+切片+标签）
+        logger.info(f"开始自动处理文档: {md_filename}")
+        try:
+            from document_routes import process_document_task
+            await process_document_task(md_filename)
+            logger.info(f"文档处理完成: {md_filename}")
+        except Exception as doc_err:
+            logger.error(f"文档处理失败: {doc_err}")
+            # 文档处理失败不影响上传状态，仍标记为completed
+            # 用户可以在文档列表中手动重新触发处理
+
         # 更新数据库状态为完成
         update_file_upload_status(
             upload_id,
@@ -583,15 +594,29 @@ async def upload_file(
     支持的文件类型：PDF, DOCX, PPTX, XLSX, JPG, PNG, MD等
     """
     try:
-        # 检查文件类型
-        if file.content_type not in SUPPORTED_FILE_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的文件类型: {file.content_type}。支持的类型: {', '.join(SUPPORTED_FILE_TYPES.values())}"
-            )
+        # 检查文件类型（优先使用文件扩展名，兼容content_type不准确的情况）
+        file_extension = None
+        actual_content_type = file.content_type
+
+        # 先根据文件名扩展名判断
+        if file.filename.endswith('.md'):
+            file_extension = '.md'
+            actual_content_type = 'text/markdown'
+        elif file.content_type in SUPPORTED_FILE_TYPES:
+            file_extension = SUPPORTED_FILE_TYPES[file.content_type]
+        else:
+            # 尝试从文件名提取扩展名
+            from pathlib import Path
+            ext = Path(file.filename).suffix.lower()
+            if ext in SUPPORTED_FILE_TYPES.values():
+                file_extension = ext
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"不支持的文件类型: {file.content_type}，文件名: {file.filename}。支持的类型: {', '.join(SUPPORTED_FILE_TYPES.values())}"
+                )
 
         # 保存文件
-        file_extension = SUPPORTED_FILE_TYPES[file.content_type]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_filename = f"{timestamp}_{file.filename}"
         upload_path = UPLOAD_DIR / safe_filename
@@ -609,7 +634,7 @@ async def upload_file(
         upload_id = create_file_upload_record(
             original_filename=file.filename,
             file_size=file_size,
-            file_type=file.content_type,
+            file_type=actual_content_type,  # 使用修正后的content_type
             upload_path=str(upload_path)
         )
 
@@ -683,6 +708,80 @@ async def list_uploads(limit: int = 50):
         )
         for r in records
     ]
+
+
+@router.post("/api/upload/batch-md")
+async def batch_upload_markdown(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...)
+):
+    """
+    批量上传 Markdown 文件
+    只接受 .md 文件，跳过 MinerU 转换，直接处理
+    """
+    results = []
+
+    for file in files:
+        try:
+            # 检查文件扩展名
+            if not file.filename.endswith('.md'):
+                results.append({
+                    'filename': file.filename,
+                    'status': 'error',
+                    'error': '只支持 .md 文件'
+                })
+                continue
+
+            # 保存文件
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # 加入微秒避免重名
+            safe_filename = f"{timestamp}_{file.filename}"
+            upload_path = UPLOAD_DIR / safe_filename
+
+            content = await file.read()
+            with open(upload_path, 'wb') as f:
+                f.write(content)
+
+            file_size = len(content)
+
+            # 创建数据库记录
+            upload_id = create_file_upload_record(
+                original_filename=file.filename,
+                file_size=file_size,
+                file_type='text/markdown',
+                upload_path=str(upload_path)
+            )
+
+            # 启动后台处理任务
+            background_tasks.add_task(process_markdown_file_directly, upload_id)
+
+            results.append({
+                'id': upload_id,
+                'filename': file.filename,
+                'status': 'pending',
+                'size': file_size
+            })
+
+            logger.info(f"批量上传: {file.filename} (upload_id={upload_id})")
+
+        except Exception as e:
+            logger.error(f"批量上传失败: {file.filename} - {e}")
+            results.append({
+                'filename': file.filename,
+                'status': 'error',
+                'error': str(e)
+            })
+
+    success_count = len([r for r in results if r['status'] == 'pending'])
+    failed_count = len([r for r in results if r['status'] == 'error'])
+
+    logger.info(f"批量上传完成: 总数={len(files)}, 成功={success_count}, 失败={failed_count}")
+
+    return {
+        'total': len(files),
+        'success': success_count,
+        'failed': failed_count,
+        'results': results
+    }
 
 
 @router.delete("/api/upload/{upload_id}")

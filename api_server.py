@@ -15,6 +15,9 @@ load_dotenv()
 # 导入数据库操作模块
 from database import init_database
 
+# 导入配置模块
+from config import ServerConfig
+
 # 导入路由模块
 from chat_routes import router as chat_router
 from document_routes import router as document_router
@@ -136,11 +139,12 @@ if __name__ == "__main__":
     print("📚 文档管理路由: /api/documents/*")
     print("💬 对话路由: /api/chat/*")
     print("🤖 Agent 路由: /api/agent/*")
-    print("📖 API 文档: http://localhost:8086/docs")
+    print(f"📖 API 文档: http://{ServerConfig.API_HOST}:{ServerConfig.API_PORT}/docs")
 
     uvicorn.run(
         "api_server:app",
-        host="0.0.0.0",
-        port=8086,
-        reload=True
+        host=ServerConfig.API_HOST,
+        port=ServerConfig.API_PORT,
+        reload=ServerConfig.API_RELOAD,
+        workers=ServerConfig.API_WORKERS if not ServerConfig.API_RELOAD else 1
     )

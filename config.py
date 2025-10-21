@@ -281,6 +281,23 @@ class VectorConfig:
     SKIP_VECTORIZED = os.getenv("VECTOR_SKIP_VECTORIZED", "true").lower() == "true"
 
 
+# ==================== 服务器配置 ====================
+class ServerConfig:
+    """服务器相关配置"""
+    
+    # API 服务器端口
+    API_PORT = int(os.getenv("API_PORT", "8086"))
+    
+    # API 服务器主机地址
+    API_HOST = os.getenv("API_HOST", "0.0.0.0")
+    
+    # 是否启用热重载（开发模式）
+    API_RELOAD = os.getenv("API_RELOAD", "true").lower() == "true"
+    
+    # 工作进程数量
+    API_WORKERS = int(os.getenv("API_WORKERS", "1"))
+
+
 # ==================== 工具函数 ====================
 def validate_config():
     """验证配置完整性"""

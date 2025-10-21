@@ -7,13 +7,43 @@
 ## 架构
 
 - **Milvus**: 向量数据库服务（端口 19530, 9091）
-- **Backend**: FastAPI 后端服务（端口 8000）
+- **Backend**: FastAPI 后端服务（端口 ${API_PORT:-8086}，可配置）
 
 ## 前置要求
 
 - Docker >= 20.10
 - Docker Compose >= 2.0
 - 已配置好的 `.env` 文件（参考项目根目录的 `env.template`）
+
+## 构建脚本
+
+我们提供了两个构建脚本来简化构建和部署流程：
+
+### 快速构建脚本（推荐）
+
+```bash
+# 等同于您原来的构建命令
+./quick-build.sh --proxy --start
+
+# 其他常用选项
+./quick-build.sh --tsinghua --start    # 使用清华源
+./quick-build.sh --clean --proxy --start  # 清除缓存重新构建
+```
+
+### 完整构建脚本
+
+```bash
+# 代理构建并启动
+./build.sh -p -s
+
+# 清除缓存代理构建并后台启动
+./build.sh -c -p -d
+
+# 使用清华源无缓存构建
+./build.sh -t --no-cache -s
+```
+
+详细使用说明请参考 [BUILD_GUIDE.md](./BUILD_GUIDE.md)
 
 ## 快速开始
 
@@ -64,8 +94,8 @@ docker compose ps
 ```
 
 访问后端 API：
-- API 文档: http://localhost:8000/docs
-- 健康检查: http://localhost:8000/api/assistants
+- API 文档: http://localhost:${API_PORT:-8086}/docs
+- 健康检查: http://localhost:${API_PORT:-8086}/api/assistants
 
 查看日志：
 
@@ -135,7 +165,7 @@ MILVUS_PORT=19530
 ### 服务无法启动
 
 1. 检查 Docker 是否运行：`docker ps`
-2. 检查端口占用：`lsof -i :8000` 或 `lsof -i :19530`
+2. 检查端口占用：`lsof -i :${API_PORT:-8086}` 或 `lsof -i :19530`
 3. 查看容器日志：`docker compose logs`
 
 ### Milvus 连接失败
