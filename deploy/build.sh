@@ -74,21 +74,50 @@ check_docker() {
 # 检查 docker-compose 文件
 check_compose_file() {
     # 检测系统类型并选择合适的 compose 文件
+    COMPOSE_FILE="docker-compose.yml"
+    
+    # 多种方式检测 Linux 发行版
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        # Linux 系统，检查是否是 Ubuntu
-        if command -v lsb_release >/dev/null 2>&1; then
-            if lsb_release -d | grep -q "Ubuntu"; then
+        # 方法1: 检查 /etc/os-release
+        if [ -f "/etc/os-release" ]; then
+            if grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
                 COMPOSE_FILE="docker-compose.ubuntu.yml"
-                log_info "检测到 Ubuntu 系统，使用 Ubuntu 专用配置"
-            else
-                COMPOSE_FILE="docker-compose.yml"
+                log_info "检测到 Ubuntu 系统（通过 /etc/os-release），使用 Ubuntu 专用配置"
+            elif grep -q "CentOS\|Red Hat\|Rocky\|AlmaLinux" /etc/os-release 2>/dev/null; then
+                COMPOSE_FILE="docker-compose.centos.yml"
+                log_info "检测到 CentOS/RHEL 系统（通过 /etc/os-release），使用 CentOS 专用配置"
             fi
-        else
-            COMPOSE_FILE="docker-compose.yml"
+        # 方法2: 检查 lsb_release
+        elif command -v lsb_release >/dev/null 2>&1; then
+            if lsb_release -d 2>/dev/null | grep -q "Ubuntu"; then
+                COMPOSE_FILE="docker-compose.ubuntu.yml"
+                log_info "检测到 Ubuntu 系统（通过 lsb_release），使用 Ubuntu 专用配置"
+            fi
+        # 方法3: 检查 /etc/lsb-release
+        elif [ -f "/etc/lsb-release" ]; then
+            if grep -q "Ubuntu" /etc/lsb-release 2>/dev/null; then
+                COMPOSE_FILE="docker-compose.ubuntu.yml"
+                log_info "检测到 Ubuntu 系统（通过 /etc/lsb-release），使用 Ubuntu 专用配置"
+            fi
+        # 方法4: 检查 hostname 或其他标识
+        elif hostname 2>/dev/null | grep -q "ubuntu"; then
+            COMPOSE_FILE="docker-compose.ubuntu.yml"
+            log_info "检测到 Ubuntu 系统（通过 hostname），使用 Ubuntu 专用配置"
+        elif hostname 2>/dev/null | grep -q "centos\|rhel\|rocky\|alma"; then
+            COMPOSE_FILE="docker-compose.centos.yml"
+            log_info "检测到 CentOS/RHEL 系统（通过 hostname），使用 CentOS 专用配置"
         fi
-    else
-        # macOS 或其他系统
-        COMPOSE_FILE="docker-compose.yml"
+    fi
+    
+    # 检查 Docker 驱动，如果是 docker-container 驱动，强制使用兼容配置
+    if docker info 2>/dev/null | grep -q "docker-container"; then
+        if [ -f "docker-compose.centos.yml" ]; then
+            COMPOSE_FILE="docker-compose.centos.yml"
+            log_info "检测到 docker-container 驱动，使用 CentOS 专用配置以避免 host-gateway 问题"
+        elif [ -f "docker-compose.ubuntu.yml" ]; then
+            COMPOSE_FILE="docker-compose.ubuntu.yml"
+            log_info "检测到 docker-container 驱动，使用 Ubuntu 专用配置以避免 host-gateway 问题"
+        fi
     fi
     
     if [ ! -f "$COMPOSE_FILE" ]; then
