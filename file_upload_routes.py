@@ -8,6 +8,7 @@ import aiohttp
 import sqlite3
 import shutil
 import logging
+import asyncio
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
@@ -16,6 +17,9 @@ from pydantic import BaseModel
 
 # 导入图片处理模块
 from image_uploader import create_image_processor
+
+# 导入超时保护工具
+from utils.timeout_protection import timeout_context, TimeoutMonitor
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -441,20 +445,30 @@ async def process_markdown_file_directly(upload_id: int):
 
         logger.info(f"Markdown 文件已复制到: {converted_path}")
 
-        # 处理图片URL（如果有的话）
+        # 处理图片URL（使用异步处理，带超时保护）
         try:
             logger.info("开始处理Markdown中的图片...")
             image_processor = create_image_processor()
 
             # 将处理后的文件保存到 ALL_MD_DIR
             md_path = ALL_MD_DIR / md_filename
-            success = image_processor.process_markdown_file(converted_path, md_path)
-
-            if success:
-                logger.info(f"图片处理完成，文件已保存到: {md_path}")
-                image_processor.print_stats()
-            else:
-                logger.warning("图片处理失败，复制原始文件到 ALL_MD_DIR")
+            
+            # 使用异步处理，总超时时间5分钟
+            try:
+                success = await asyncio.wait_for(
+                    image_processor.process_markdown_file_async(converted_path, md_path),
+                    timeout=300.0  # 5分钟总超时
+                )
+                
+                if success:
+                    logger.info(f"图片处理完成，文件已保存到: {md_path}")
+                    image_processor.print_stats()
+                else:
+                    logger.warning("图片处理失败，复制原始文件到 ALL_MD_DIR")
+                    shutil.copy2(converted_path, md_path)
+                    
+            except asyncio.TimeoutError:
+                logger.error("图片处理超时（5分钟），使用原始文件")
                 shutil.copy2(converted_path, md_path)
 
         except Exception as e:
@@ -539,20 +553,30 @@ async def process_file_conversion(upload_id: int):
 
                 logger.info(f"MinerU转换完成，文件已保存: {converted_path}")
 
-                # 处理图片URL（上传图片并替换链接）
+                # 处理图片URL（使用异步处理，带超时保护）
                 try:
                     logger.info("开始处理Markdown中的图片...")
                     image_processor = create_image_processor()
 
                     # 将处理后的文件保存到 ALL_MD_DIR
                     md_path = ALL_MD_DIR / md_filename
-                    success = image_processor.process_markdown_file(converted_path, md_path)
-
-                    if success:
-                        logger.info(f"图片处理完成，文件已保存到: {md_path}")
-                        image_processor.print_stats()
-                    else:
-                        logger.warning("图片处理失败，复制原始文件到 ALL_MD_DIR")
+                    
+                    # 使用异步处理，总超时时间5分钟
+                    try:
+                        success = await asyncio.wait_for(
+                            image_processor.process_markdown_file_async(converted_path, md_path),
+                            timeout=300.0  # 5分钟总超时
+                        )
+                        
+                        if success:
+                            logger.info(f"图片处理完成，文件已保存到: {md_path}")
+                            image_processor.print_stats()
+                        else:
+                            logger.warning("图片处理失败，复制原始文件到 ALL_MD_DIR")
+                            shutil.copy2(converted_path, md_path)
+                            
+                    except asyncio.TimeoutError:
+                        logger.error("图片处理超时（5分钟），使用原始文件")
                         shutil.copy2(converted_path, md_path)
 
                 except Exception as e:
@@ -616,16 +640,28 @@ async def upload_file(
                     detail=f"不支持的文件类型: {file.content_type}，文件名: {file.filename}。支持的类型: {', '.join(SUPPORTED_FILE_TYPES.values())}"
                 )
 
+        # 读取文件内容
+        content = await file.read()
+        file_size = len(content)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        # 检查文件大小（限制100MB）
+        if file_size_mb > 100:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件过大: {file_size_mb:.1f}MB，单个文件最大支持100MB"
+            )
+        
+        if file_size_mb > 50:
+            logger.warning(f"上传大文件: {file.filename} ({file_size_mb:.1f}MB)")
+        
         # 保存文件
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_filename = f"{timestamp}_{file.filename}"
         upload_path = UPLOAD_DIR / safe_filename
 
-        content = await file.read()
         with open(upload_path, 'wb') as f:
             f.write(content)
-
-        file_size = len(content)
 
         # 判断是否是 Markdown 文件
         is_markdown = file_extension == '.md' or file.filename.endswith('.md')

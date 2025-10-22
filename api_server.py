@@ -25,6 +25,7 @@ from agent_routes import router as agent_router
 from config_routes import router as config_router
 from file_upload_routes import router as file_upload_router
 from oauth_routes import router as oauth_router
+from log_routes import router as log_router
 
 # 创建 FastAPI 应用
 app = FastAPI(title="RAG Preprocessor API", version="2.0.0")
@@ -45,6 +46,7 @@ app.include_router(agent_router, tags=["Agent"])
 app.include_router(config_router, tags=["Config"])
 app.include_router(file_upload_router, tags=["File Upload"])
 app.include_router(oauth_router, tags=["OAuth"])
+app.include_router(log_router, tags=["Logs"])
 
 
 @app.get("/")
@@ -110,13 +112,18 @@ async def root():
                 "github_callback": "GET /api/oauth/github",
                 "user_info": "GET /api/oauth/user/{user_id}",
                 "user_bindings": "GET /api/oauth/user/{user_id}/bindings"
+            },
+            "logs": {
+                "document": "GET /api/logs/document",
+                "oauth": "GET /api/logs/oauth"
             }
         },
         "modules": {
             "document_routes": "文档和切片管理",
             "agent_routes": "Agent 对话",
             "chat_routes": "普通对话",
-            "oauth_routes": "第三方登录"
+            "oauth_routes": "第三方登录",
+            "log_routes": "操作日志查询"
         }
     }
 

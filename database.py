@@ -472,6 +472,206 @@ def get_document_logs(document_id: int, limit: int = 100) -> List[Dict[str, Any]
         return logs
 
 
+def query_document_logs(
+    *,
+    document_id: Optional[int] = None,
+    filename: Optional[str] = None,
+    chunk_id: Optional[int] = None,
+    actions: Optional[List[str]] = None,
+    user_id: Optional[str] = None,
+    search: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """带过滤条件的分页查询文档操作日志"""
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    base_query = (
+        "SELECT dl.id, dl.document_id, d.filename, dl.chunk_id, dl.action, dl.message, "
+        "dl.user_id, dl.created_at, dl.payload "
+        "FROM document_logs dl "
+        "JOIN documents d ON dl.document_id = d.id"
+    )
+
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if document_id is not None:
+        conditions.append("dl.document_id = ?")
+        params.append(document_id)
+
+    if filename:
+        conditions.append("d.filename LIKE ?")
+        params.append(f"%{filename}%")
+
+    if chunk_id is not None:
+        conditions.append("dl.chunk_id = ?")
+        params.append(chunk_id)
+
+    if actions:
+        action_list = [action for action in actions if action]
+        if action_list:
+            placeholders = ",".join(["?"] * len(action_list))
+            conditions.append(f"dl.action IN ({placeholders})")
+            params.extend(action_list)
+
+    if user_id:
+        conditions.append("dl.user_id = ?")
+        params.append(user_id)
+
+    if search:
+        search_term = f"%{search.lower()}%"
+        conditions.append(
+            "(LOWER(COALESCE(dl.message, '')) LIKE ? OR LOWER(COALESCE(dl.payload, '')) LIKE ?)"
+        )
+        params.extend([search_term, search_term])
+
+    if start_time:
+        conditions.append("dl.created_at >= ?")
+        params.append(start_time)
+
+    if end_time:
+        conditions.append("dl.created_at <= ?")
+        params.append(end_time)
+
+    where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query_sql = (
+        base_query
+        + where_clause
+        + " ORDER BY dl.created_at DESC, dl.id DESC"
+        + " LIMIT ? OFFSET ?"
+    )
+
+    count_sql = "SELECT COUNT(*) FROM document_logs dl JOIN documents d ON dl.document_id = d.id" + where_clause
+
+    with get_connection() as conn:
+        total = conn.execute(count_sql, params).fetchone()[0]
+
+        query_params = params + [limit, offset]
+        rows = conn.execute(query_sql, query_params).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record['payload'] = _json_load(record.get('payload'))
+            items.append(record)
+
+        actions_rows = conn.execute(
+            "SELECT DISTINCT action FROM document_logs ORDER BY action"
+        ).fetchall()
+        available_actions = [row[0] for row in actions_rows if row[0]]
+
+    return {
+        "total": total,
+        "items": items,
+        "available_actions": available_actions
+    }
+
+
+def query_oauth_logs(
+    *,
+    provider: Optional[str] = None,
+    action: Optional[List[str]] = None,
+    user_id: Optional[int] = None,
+    success: Optional[bool] = None,
+    search: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """带过滤条件的分页查询 OAuth 操作日志"""
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    base_query = (
+        "SELECT ol.id, ol.user_id, ol.provider, ol.action, ol.ip_address, ol.user_agent, "
+        "ol.success, ol.error_message, ol.created_at "
+        "FROM oauth_logs ol"
+    )
+
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if provider:
+        conditions.append("ol.provider = ?")
+        params.append(provider)
+
+    if action:
+        action_list = [item for item in action if item]
+        if action_list:
+            placeholders = ",".join(["?"] * len(action_list))
+            conditions.append(f"ol.action IN ({placeholders})")
+            params.extend(action_list)
+
+    if user_id is not None:
+        conditions.append("ol.user_id = ?")
+        params.append(user_id)
+
+    if success is not None:
+        conditions.append("ol.success = ?")
+        params.append(1 if success else 0)
+
+    if search:
+        search_term = f"%{search.lower()}%"
+        conditions.append(
+            "(LOWER(COALESCE(ol.error_message, '')) LIKE ? OR LOWER(COALESCE(ol.user_agent, '')) LIKE ?)"
+        )
+        params.extend([search_term, search_term])
+
+    if start_time:
+        conditions.append("ol.created_at >= ?")
+        params.append(start_time)
+
+    if end_time:
+        conditions.append("ol.created_at <= ?")
+        params.append(end_time)
+
+    where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query_sql = (
+        base_query
+        + where_clause
+        + " ORDER BY ol.created_at DESC, ol.id DESC"
+        + " LIMIT ? OFFSET ?"
+    )
+
+    count_sql = "SELECT COUNT(*) FROM oauth_logs ol" + where_clause
+
+    with get_connection() as conn:
+        total = conn.execute(count_sql, params).fetchone()[0]
+
+        query_params = params + [limit, offset]
+        rows = conn.execute(query_sql, query_params).fetchall()
+
+        items: List[Dict[str, Any]] = [dict(row) for row in rows]
+        for item in items:
+            item['success'] = bool(item.get('success'))
+
+        actions_rows = conn.execute(
+            "SELECT DISTINCT action FROM oauth_logs ORDER BY action"
+        ).fetchall()
+        available_actions = [row[0] for row in actions_rows if row[0]]
+
+        provider_rows = conn.execute(
+            "SELECT DISTINCT provider FROM oauth_logs ORDER BY provider"
+        ).fetchall()
+        available_providers = [row[0] for row in provider_rows if row[0]]
+
+    return {
+        "total": total,
+        "items": items,
+        "available_actions": available_actions,
+        "available_providers": available_providers
+    }
+
+
 # ============================================
 # 工具函数
 # ============================================

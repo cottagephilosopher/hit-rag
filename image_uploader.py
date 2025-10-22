@@ -7,8 +7,10 @@ import os
 import re
 import tos
 import logging
+import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +81,60 @@ class ImageUploader:
 class MarkdownImageProcessor:
     """处理Markdown文件中的图片链接"""
 
-    def __init__(self, uploader: Optional[ImageUploader] = None):
+    def __init__(self, uploader: Optional[ImageUploader] = None, max_concurrent: int = 5):
         """
         Args:
             uploader: ImageUploader实例，如果为None则不上传图片
+            max_concurrent: 最大并发处理数
         """
         self.uploader = uploader
+        self.max_concurrent = max_concurrent
+        self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self.stats = {
             'total_images': 0,
             'uploaded_images': 0,
             'failed_images': 0,
-            'skipped_images': 0
+            'skipped_images': 0,
+            'invalid_images': 0
         }
+
+    def _is_valid_image_url(self, img_url: str) -> bool:
+        """
+        验证图片URL是否有效
+        
+        过滤掉以下无效URL：
+        - AWS签名URL片段
+        - 超长URL（可能损坏）
+        - 不包含常见图片扩展名的URL
+        """
+        # 跳过AWS签名URL片段
+        if 'aws4_request' in img_url or 'X-Amz-' in img_url:
+            logger.warning(f"跳过AWS签名URL片段: {img_url[:100]}...")
+            return False
+        
+        # 跳过过长的URL（可能是损坏的）
+        if len(img_url) > 500:
+            logger.warning(f"跳过过长URL: {len(img_url)} 字符")
+            return False
+        
+        # 检查是否包含常见图片扩展名
+        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']
+        url_lower = img_url.lower()
+        
+        # 对于完整URL，提取文件名部分检查
+        if url_lower.startswith(('http://', 'https://')):
+            # 从URL中提取文件名（去除查询参数）
+            url_path = img_url.split('?')[0]
+            if not any(url_path.endswith(ext) for ext in valid_extensions):
+                logger.warning(f"跳过不包含图片扩展名的URL: {img_url[:100]}...")
+                return False
+        else:
+            # 相对路径直接检查
+            if not any(url_lower.endswith(ext) for ext in valid_extensions):
+                logger.warning(f"跳过不包含图片扩展名的路径: {img_url}")
+                return False
+        
+        return True
 
     def extract_image_refs(self, md_content: str) -> List[Tuple[str, str, str]]:
         """
@@ -106,6 +150,12 @@ class MarkdownImageProcessor:
         results = []
         for match in matches:
             alt_text, img_url = match
+            
+            # 验证URL有效性
+            if not self._is_valid_image_url(img_url):
+                self.stats['invalid_images'] += 1
+                continue
+            
             # 重构完整匹配文本
             full_match = f"![{alt_text}]({img_url})"
             results.append((full_match, img_url, alt_text))
@@ -251,10 +301,109 @@ class MarkdownImageProcessor:
             traceback.print_exc()
             return False
 
+    async def process_markdown_file_async(self, md_file: Path, output_file: Optional[Path] = None) -> bool:
+        """
+        异步处理Markdown文件中的所有图片（带超时保护）
+        
+        Args:
+            md_file: 输入Markdown文件路径
+            output_file: 输出文件路径（如果为None则覆盖原文件）
+        
+        Returns:
+            成功返回True，失败返回False
+        """
+        try:
+            # 异步读取文件
+            loop = asyncio.get_event_loop()
+            with open(md_file, 'r', encoding='utf-8') as f:
+                md_content = await loop.run_in_executor(None, f.read)
+            
+            # 提取图片引用
+            image_refs = self.extract_image_refs(md_content)
+            
+            if not image_refs:
+                logger.info(f"文件中没有图片引用: {md_file.name}")
+                # 即使没有图片，也需要复制文件
+                if output_file and output_file != md_file:
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        await loop.run_in_executor(None, f.write, md_content)
+                return True
+            
+            logger.info(f"找到 {len(image_refs)} 个有效图片引用")
+            
+            # 限制处理的图片数量（防止过多图片导致系统卡死）
+            max_images = 100
+            if len(image_refs) > max_images:
+                logger.warning(f"图片数量过多({len(image_refs)})，只处理前{max_images}个")
+                image_refs = image_refs[:max_images]
+            
+            # 异步并发处理图片（带超时保护）
+            semaphore = asyncio.Semaphore(self.max_concurrent)
+            
+            async def process_single_image(ref):
+                async with semaphore:
+                    full_match, img_url, alt_text = ref
+                    try:
+                        # 每个图片处理设置30秒超时
+                        new_url = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                self.executor,
+                                self.process_image_url,
+                                img_url,
+                                md_file.parent
+                            ),
+                            timeout=30.0
+                        )
+                        return (full_match, new_url, alt_text)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"图片处理超时(30秒): {img_url[:100]}")
+                        self.stats['failed_images'] += 1
+                        return (full_match, None, alt_text)
+                    except Exception as e:
+                        logger.error(f"图片处理异常: {e}")
+                        self.stats['failed_images'] += 1
+                        return (full_match, None, alt_text)
+            
+            # 并发处理所有图片
+            results = await asyncio.gather(*[process_single_image(ref) for ref in image_refs])
+            
+            # 构建URL映射
+            url_mapping = {}
+            for full_match, new_url, alt_text in results:
+                if new_url:
+                    # 只有成功处理的图片才替换
+                    img_url = full_match.split('](')[1].rstrip(')')
+                    if new_url != img_url:
+                        new_match = f"![{alt_text}]({new_url})"
+                        url_mapping[full_match] = new_match
+            
+            # 替换URL
+            new_content = md_content
+            for old_ref, new_ref in url_mapping.items():
+                new_content = new_content.replace(old_ref, new_ref)
+            
+            # 异步写入文件
+            output_path = output_file or md_file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                await loop.run_in_executor(None, f.write, new_content)
+            
+            logger.info(f"成功处理文件: {output_path.name}")
+            logger.info(f"  - 替换了 {len(url_mapping)} 个图片链接")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"异步处理Markdown文件失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def print_stats(self):
         """打印处理统计"""
         logger.info(f"\n图片处理统计:")
         logger.info(f"  总图片数: {self.stats['total_images']}")
+        logger.info(f"  有效图片: {self.stats['total_images'] - self.stats['invalid_images']}")
+        logger.info(f"  无效图片: {self.stats['invalid_images']}")
         logger.info(f"  成功上传: {self.stats['uploaded_images']}")
         logger.info(f"  上传失败: {self.stats['failed_images']}")
         logger.info(f"  跳过处理: {self.stats['skipped_images']}")

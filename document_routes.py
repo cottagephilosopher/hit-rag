@@ -6,6 +6,7 @@
 import os
 import json
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -307,7 +308,7 @@ def check_document_status(filename: str) -> Dict[str, Any]:
 
 
 async def process_document_task(filename: str):
-    """后台任务：处理文档"""
+    """后台任务：处理文档（异步子进程，带超时保护）"""
     md_path = ALL_MD_DIR / filename
     output_path = get_output_path(filename)
 
@@ -319,45 +320,55 @@ async def process_document_task(filename: str):
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
+        # 使用异步子进程替代同步subprocess.run
+        process = await asyncio.create_subprocess_exec(
             "uv", "run", "main.py",
             str(md_path.resolve()),
-            "-o", str(OUTPUT_DIR.resolve())
-        ]
-
-        result = subprocess.run(
-            cmd,
+            "-o", str(OUTPUT_DIR.resolve()),
             cwd=IKN_PLUS_DIR,
-            capture_output=True,
-            text=True,
-            timeout=600
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
 
-        if result.returncode == 0:
-            processing_tasks[filename] = {
-                "status": "completed",
-                "completed_at": datetime.now().isoformat(),
-                "output_path": str(output_path)
-            }
+        # 设置更短的超时时间（5分钟），避免长时间阻塞
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=300.0  # 5分钟超时
+            )
+            
+            if process.returncode == 0:
+                processing_tasks[filename] = {
+                    "status": "completed",
+                    "completed_at": datetime.now().isoformat(),
+                    "output_path": str(output_path)
+                }
 
+                try:
+                    import_json_to_db(output_path, filename)
+                except Exception as e:
+                    print(f"Warning: Failed to import to DB: {e}")
+            else:
+                error_msg = stderr.decode('utf-8') if stderr else stdout.decode('utf-8') if stdout else "Unknown error"
+                processing_tasks[filename] = {
+                    "status": "error",
+                    "error": error_msg,
+                    "completed_at": datetime.now().isoformat()
+                }
+                
+        except asyncio.TimeoutError:
+            # 超时后强制终止进程
             try:
-                import_json_to_db(output_path, filename)
-            except Exception as e:
-                print(f"Warning: Failed to import to DB: {e}")
-        else:
-            error_msg = result.stderr or result.stdout or "Unknown error"
+                process.kill()
+                await process.wait()
+            except:
+                pass
+            
             processing_tasks[filename] = {
                 "status": "error",
-                "error": error_msg,
+                "error": "处理超时（超过5分钟）",
                 "completed_at": datetime.now().isoformat()
             }
-
-    except subprocess.TimeoutExpired:
-        processing_tasks[filename] = {
-            "status": "error",
-            "error": "处理超时（超过10分钟）",
-            "completed_at": datetime.now().isoformat()
-        }
 
     except Exception as e:
         processing_tasks[filename] = {

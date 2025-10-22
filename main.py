@@ -78,11 +78,26 @@ class RAGPreprocessor:
 
         start_time = datetime.now()
 
-        # 1. 读取文件
+        # 1. 读取文件（带大文件检测）
         try:
+            # 检查文件大小
+            import os
+            file_size = os.path.getsize(input_file)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            if file_size_mb > 50:
+                logger.warning(f"⚠️ 文件较大: {file_size_mb:.1f}MB，处理可能较慢")
+            
+            if file_size_mb > 100:
+                logger.error(f"❌ 文件过大: {file_size_mb:.1f}MB，超过100MB限制")
+                raise ValueError(f"文件过大: {file_size_mb:.1f}MB，请分割后再处理")
+            
             with open(input_file, 'r', encoding='utf-8') as f:
                 markdown_text = f.read()
-            logger.info(f"✅ 文件读取成功: {len(markdown_text)} 字符")
+            
+            char_count = len(markdown_text)
+            logger.info(f"✅ 文件读取成功: {char_count:,} 字符 ({file_size_mb:.1f}MB)")
+            
         except Exception as e:
             logger.error(f"❌ 文件读取失败: {e}")
             raise

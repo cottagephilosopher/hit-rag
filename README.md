@@ -182,7 +182,7 @@ npm run dev
 ```bash
 cd ./hit-rag
 uv run api_server.py
-# API 服务运行在 http://localhost:8086
+# API 服务运行在 http://localhost:${API_PORT:-8086}
 ```
 
 **启动前端界面**：
@@ -194,7 +194,7 @@ npm run dev
 
 ### API 接口
 
-访问 `http://localhost:8086/docs` 查看完整的 API 文档（Swagger UI）。
+访问 `http://localhost:${API_PORT:-8086}/docs` 查看完整的 API 文档（Swagger UI）。
 
 **核心接口**：
 
