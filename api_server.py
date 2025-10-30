@@ -116,12 +116,21 @@ async def root():
             "logs": {
                 "document": "GET /api/logs/document",
                 "oauth": "GET /api/logs/oauth"
+            },
+            # 文件上传
+            "file_upload": {
+                "upload": "POST /api/upload/file",
+                "status": "GET /api/upload/{upload_id}/status",
+                "list": "GET /api/upload/list",
+                "batch_md": "POST /api/upload/batch-md",
+                "delete": "DELETE /api/upload/{upload_id}"
             }
         },
         "modules": {
             "document_routes": "文档和切片管理",
             "agent_routes": "Agent 对话",
             "chat_routes": "普通对话",
+            "file_upload_routes": "文件上传和转换",
             "oauth_routes": "第三方登录",
             "log_routes": "操作日志查询"
         }

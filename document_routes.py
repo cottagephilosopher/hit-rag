@@ -7,10 +7,12 @@ import os
 import json
 import subprocess
 import asyncio
+import aiofiles
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from datetime import datetime, timedelta
+from functools import lru_cache
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel
 
 from database import (
@@ -46,6 +48,15 @@ from database import (
 from vector_db.vectorization_manager import VectorizationManager
 
 router = APIRouter()
+
+# ==================== 缓存配置 ====================
+# 全局文档列表缓存 - 支持多种排序方式同时缓存
+# 结构: {cache_key: (data, timestamp)}
+_documents_list_cache = {}
+_cache_ttl = timedelta(minutes=5)  # 缓存 5 分钟（文档不常变化）
+
+# 单个文档状态缓存（用于向后兼容）
+_document_cache = {}
 
 # ==================== 路径配置 ====================
 BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).parent))
@@ -256,7 +267,7 @@ def get_source_file_type(filename: str) -> Optional[str]:
 
 
 def check_document_status(filename: str) -> Dict[str, Any]:
-    """检查文档处理状态"""
+    """检查文档处理状态（同步版本，保留兼容性）"""
     output_path = get_output_path(filename)
     source_file_type = get_source_file_type(filename)
 
@@ -307,6 +318,203 @@ def check_document_status(filename: str) -> Dict[str, Any]:
     }
 
 
+async def check_document_status_async(filename: str, include_stats: bool = False) -> Dict[str, Any]:
+    """
+    异步检查文档处理状态（带缓存）
+    
+    Args:
+        filename: 文档文件名
+        include_stats: 是否包含统计信息（chunk_count, total_tokens, tags）
+    """
+    # 检查缓存
+    cache_key = f"{filename}:{include_stats}"
+    if cache_key in _document_cache:
+        cached_data, cached_time = _document_cache[cache_key]
+        if datetime.now() - cached_time < _cache_ttl:
+            return cached_data
+    
+    output_path = get_output_path(filename)
+    source_file_type = get_source_file_type(filename)
+    
+    # 检查是否正在处理
+    if filename in processing_tasks:
+        task_status = processing_tasks[filename]
+        if task_status["status"] == "processing":
+            result = {
+                "filename": filename,
+                "status": "processing",
+                "output_path": None,
+                "source_file_type": source_file_type
+            }
+            _document_cache[cache_key] = (result, datetime.now())
+            return result
+        elif task_status["status"] == "error":
+            result = {
+                "filename": filename,
+                "status": "error",
+                "error": task_status.get("error"),
+                "output_path": None,
+                "source_file_type": source_file_type
+            }
+            _document_cache[cache_key] = (result, datetime.now())
+            return result
+    
+    # 检查输出文件是否存在
+    if output_path.exists():
+        try:
+            # 使用异步文件读取
+            async with aiofiles.open(output_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                data = json.loads(content)
+                processed_at = data.get("metadata", {}).get("processed_at")
+            
+            result = {
+                "filename": filename,
+                "status": "processed",
+                "output_path": f"./output/{output_path.name}",
+                "processed_at": processed_at,
+                "source_file_type": source_file_type
+            }
+            
+            # 如果需要统计信息，从数据库获取
+            if include_stats:
+                try:
+                    doc = get_document_by_filename(filename)
+                    if doc:
+                        chunks = get_chunks_by_document(doc['id'])
+                        result['chunk_count'] = len(chunks)
+                        result['total_tokens'] = sum(c.get('token_count', 0) for c in chunks)
+                        result['updated_at'] = max(
+                            (c.get('updated_at') for c in chunks if c.get('updated_at')),
+                            default=processed_at
+                        )
+                        # 获取标签
+                        tags = get_tags_by_filename(filename)
+                        result['tags'] = tags or []
+                    else:
+                        result['chunk_count'] = 0
+                        result['total_tokens'] = 0
+                        result['tags'] = []
+                except Exception as e:
+                    print(f"获取文档 {filename} 统计信息失败: {e}")
+                    result['chunk_count'] = 0
+                    result['total_tokens'] = 0
+                    result['tags'] = []
+            
+            _document_cache[cache_key] = (result, datetime.now())
+            return result
+            
+        except Exception as e:
+            result = {
+                "filename": filename,
+                "status": "error",
+                "error": f"读取输出文件失败: {str(e)}",
+                "output_path": None,
+                "source_file_type": source_file_type
+            }
+            _document_cache[cache_key] = (result, datetime.now())
+            return result
+    
+    result = {
+        "filename": filename,
+        "status": "not_processed",
+        "output_path": None,
+        "source_file_type": source_file_type
+    }
+    _document_cache[cache_key] = (result, datetime.now())
+    return result
+
+
+def clear_document_cache(filename: Optional[str] = None):
+    """清除文档缓存"""
+    global _documents_list_cache
+    
+    # 清除全局列表缓存（任何文档变更都会影响列表）
+    _documents_list_cache.clear()
+    
+    if filename:
+        # 清除特定文档的所有缓存
+        keys_to_remove = [k for k in _document_cache.keys() if k.startswith(f"{filename}:")]
+        for key in keys_to_remove:
+            del _document_cache[key]
+    else:
+        # 清除所有缓存
+        _document_cache.clear()
+    
+    print(f"🔄 已清除文档缓存{f': {filename}' if filename else ''}")
+
+
+def get_batch_document_stats(filenames: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    批量获取文档统计信息（一次 SQL 查询）
+    
+    Returns:
+        {filename: {chunk_count, total_tokens, updated_at, tags}}
+    """
+    if not filenames:
+        return {}
+    
+    stats_map = {}
+    
+    try:
+        with get_connection() as conn:
+            # 批量查询文档统计信息
+            placeholders = ','.join('?' * len(filenames))
+            query = f"""
+            SELECT 
+                d.filename,
+                d.id as document_id,
+                COUNT(c.id) as chunk_count,
+                COALESCE(SUM(c.token_count), 0) as total_tokens,
+                MAX(c.updated_at) as updated_at
+            FROM documents d
+            LEFT JOIN document_chunks c ON d.id = c.document_id
+            WHERE d.filename IN ({placeholders})
+            GROUP BY d.id, d.filename
+            """
+            
+            rows = conn.execute(query, filenames).fetchall()
+            
+            for row in rows:
+                stats_map[row['filename']] = {
+                    'document_id': row['document_id'],
+                    'chunk_count': row['chunk_count'] or 0,
+                    'total_tokens': row['total_tokens'] or 0,
+                    'updated_at': row['updated_at']
+                }
+            
+            # 批量获取标签（一次查询）
+            tags_query = f"""
+            SELECT d.filename, dt.tag_text as tag
+            FROM documents d
+            JOIN document_tags dt ON d.id = dt.document_id
+            WHERE d.filename IN ({placeholders})
+            ORDER BY d.filename, dt.tag_text
+            """
+            
+            tag_rows = conn.execute(tags_query, filenames).fetchall()
+            
+            # 组织标签数据
+            for row in tag_rows:
+                filename = row['filename']
+                if filename in stats_map:
+                    if 'tags' not in stats_map[filename]:
+                        stats_map[filename]['tags'] = []
+                    stats_map[filename]['tags'].append(row['tag'])
+            
+            # 确保所有文档都有 tags 字段
+            for filename in stats_map:
+                if 'tags' not in stats_map[filename]:
+                    stats_map[filename]['tags'] = []
+                    
+    except Exception as e:
+        print(f"批量获取文档统计失败: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return stats_map
+
+
 async def process_document_task(filename: str):
     """后台任务：处理文档（异步子进程，带超时保护）"""
     md_path = ALL_MD_DIR / filename
@@ -348,6 +556,9 @@ async def process_document_task(filename: str):
                     import_json_to_db(output_path, filename)
                 except Exception as e:
                     print(f"Warning: Failed to import to DB: {e}")
+                
+                # 清除缓存（文档已处理完成）
+                clear_document_cache(filename)
             else:
                 error_msg = stderr.decode('utf-8') if stderr else stdout.decode('utf-8') if stdout else "Unknown error"
                 processing_tasks[filename] = {
@@ -355,6 +566,8 @@ async def process_document_task(filename: str):
                     "error": error_msg,
                     "completed_at": datetime.now().isoformat()
                 }
+                # 清除缓存（处理失败也需要更新列表）
+                clear_document_cache(filename)
                 
         except asyncio.TimeoutError:
             # 超时后强制终止进程
@@ -369,6 +582,8 @@ async def process_document_task(filename: str):
                 "error": "处理超时（超过5分钟）",
                 "completed_at": datetime.now().isoformat()
             }
+            # 清除缓存
+            clear_document_cache(filename)
 
     except Exception as e:
         processing_tasks[filename] = {
@@ -376,22 +591,170 @@ async def process_document_task(filename: str):
             "error": str(e),
             "completed_at": datetime.now().isoformat()
         }
+        # 清除缓存
+        clear_document_cache(filename)
 
 
 # ==================== 文档管理 API ====================
 
-@router.get("/api/documents", response_model=List[Document])
-async def list_documents():
-    """列出所有文档及其状态"""
+@router.get("/api/documents")
+async def list_documents(
+    limit: Optional[int] = Query(None, description="每页数量，默认返回所有"),
+    offset: int = Query(0, description="跳过的文档数量"),
+    include_stats: bool = Query(False, description="是否包含统计信息（chunk数、token数、标签等）"),
+    sort: str = Query("newest", description="排序方式: newest(从新到旧) | oldest(从旧到新)")
+):
+    """
+    列出文档及其状态
+    
+    支持分页、排序和可选的统计信息加载，使用批量查询和全局缓存大幅提升性能
+    支持同时缓存多种排序方式，切换排序无需重新查询
+    """
+    global _documents_list_cache
+    
     if not ALL_MD_DIR.exists():
         raise HTTPException(status_code=500, detail=f"文档目录不存在: {ALL_MD_DIR}")
 
-    documents = []
-    for file in sorted(ALL_MD_DIR.glob("*.md")):
-        status_info = check_document_status(file.name)
-        documents.append(Document(**status_info))
+    # 检查缓存（包含排序参数）
+    cache_key = f"full_list:{include_stats}:{sort}"
+    use_global_cache = include_stats and limit is None and offset == 0
+    
+    if use_global_cache and cache_key in _documents_list_cache:
+        cached_data, cached_time = _documents_list_cache[cache_key]
+        # 检查缓存是否过期
+        if datetime.now() - cached_time < _cache_ttl:
+            print(f"✅ 使用缓存的文档列表 (排序: {sort})")
+            return cached_data
+        else:
+            # 缓存过期，删除
+            del _documents_list_cache[cache_key]
+            print(f"⏱️  缓存已过期，重新查询 (排序: {sort})")
 
-    return documents
+    # 获取所有 md 文件并排序
+    # sort="newest": 从新到旧（默认，文件修改时间倒序）
+    # sort="oldest": 从旧到新（文件修改时间正序）
+    reverse_order = (sort != "oldest")
+    all_files = sorted(ALL_MD_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=reverse_order)
+    total_count = len(all_files)
+    
+    # 应用分页
+    if limit is not None:
+        paginated_files = all_files[offset:offset + limit]
+    else:
+        paginated_files = all_files[offset:]
+    
+    # 构建文档列表
+    documents = []
+    
+    if include_stats:
+        # 使用批量查询（性能提升关键！）
+        print(f"🔍 批量查询 {len(paginated_files)} 个文档的统计信息...")
+        
+        # 1. 并发读取文档基本状态
+        basic_status_tasks = []
+        filenames_to_query = []
+        
+        for file in paginated_files:
+            output_path = get_output_path(file.name)
+            source_file_type = get_source_file_type(file.name)
+            
+            # 检查处理状态
+            if file.name in processing_tasks:
+                task_status = processing_tasks[file.name]
+                if task_status["status"] == "processing":
+                    documents.append({
+                        "filename": file.name,
+                        "status": "processing",
+                        "output_path": None,
+                        "source_file_type": source_file_type,
+                        "chunk_count": 0,
+                        "total_tokens": 0,
+                        "tags": []
+                    })
+                    continue
+                elif task_status["status"] == "error":
+                    documents.append({
+                        "filename": file.name,
+                        "status": "error",
+                        "error": task_status.get("error"),
+                        "output_path": None,
+                        "source_file_type": source_file_type,
+                        "chunk_count": 0,
+                        "total_tokens": 0,
+                        "tags": []
+                    })
+                    continue
+            
+            # 检查是否已处理
+            if output_path.exists():
+                basic_status_tasks.append((file.name, output_path, source_file_type, "processed"))
+                filenames_to_query.append(file.name)
+            else:
+                documents.append({
+                    "filename": file.name,
+                    "status": "not_processed",
+                    "output_path": None,
+                    "source_file_type": source_file_type,
+                    "chunk_count": 0,
+                    "total_tokens": 0,
+                    "tags": []
+                })
+        
+        # 2. 批量获取统计信息（一次数据库查询！）
+        stats_map = get_batch_document_stats(filenames_to_query)
+        
+        # 3. 异步读取 JSON 文件获取 processed_at
+        async def read_processed_at(filename: str, output_path: Path):
+            try:
+                async with aiofiles.open(output_path, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    data = json.loads(content)
+                    return filename, data.get("metadata", {}).get("processed_at")
+            except:
+                return filename, None
+        
+        processed_at_map = {}
+        if basic_status_tasks:
+            processed_at_results = await asyncio.gather(
+                *[read_processed_at(fn, op) for fn, op, _, _ in basic_status_tasks]
+            )
+            processed_at_map = dict(processed_at_results)
+        
+        # 4. 组装结果
+        for filename, output_path, source_file_type, status in basic_status_tasks:
+            stats = stats_map.get(filename, {})
+            documents.append({
+                "filename": filename,
+                "status": status,
+                "output_path": f"./output/{output_path.name}",
+                "processed_at": processed_at_map.get(filename),
+                "source_file_type": source_file_type,
+                "chunk_count": stats.get('chunk_count', 0),
+                "total_tokens": stats.get('total_tokens', 0),
+                "updated_at": stats.get('updated_at'),
+                "tags": stats.get('tags', [])
+            })
+    else:
+        # 不需要统计信息时，只读取基本状态（快速模式）
+        for file in paginated_files:
+            status_info = check_document_status(file.name)
+            documents.append(status_info)
+    
+    result = {
+        "documents": documents,
+        "total": total_count,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + len(documents)) < total_count
+    }
+    
+    # 缓存完整列表结果（支持多种排序同时缓存）
+    if use_global_cache:
+        _documents_list_cache[cache_key] = (result, datetime.now())
+        print(f"💾 已缓存文档列表 ({len(documents)} 个文档, 排序: {sort})")
+        print(f"📊 当前缓存的排序方式: {list(k.split(':')[-1] for k in _documents_list_cache.keys())}")
+    
+    return result
 
 
 @router.get("/api/documents/{filename}/status", response_model=Document)
@@ -416,6 +779,8 @@ async def process_document(filename: str, background_tasks: BackgroundTasks):
     if status_info["status"] == "processing":
         return Document(**status_info)
 
+    # 清除该文档的缓存
+    clear_document_cache(filename)
     background_tasks.add_task(process_document_task, filename)
 
     return Document(
@@ -471,6 +836,9 @@ async def delete_output(filename: str):
         # 4. 清理处理任务状态
         if filename in processing_tasks:
             del processing_tasks[filename]
+
+        # 5. 清除缓存
+        clear_document_cache(filename)
 
         return {
             "message": f"已删除切片数据: {filename}",
@@ -707,6 +1075,9 @@ async def delete_completely(filename: str):
         md_path.unlink()
         deleted_items["md_file"] = str(md_path)
 
+        # 7. 清除缓存
+        clear_document_cache(filename)
+
         return {
             "message": f"已彻底删除所有相关文件和数据: {filename}",
             "deleted_items": deleted_items
@@ -754,12 +1125,17 @@ async def update_chunk_endpoint(chunk_id: int, request: ChunkUpdateRequest):
         "user_tag": chunk.get("user_tag")
     }
 
+    # 处理 user_tag：如果传递了 null，表示要清空，转换为空字符串
+    user_tag_to_update = request.user_tag
+    if 'user_tag' in request.model_dump(exclude_unset=True) and request.user_tag is None:
+        user_tag_to_update = ""  # null 转换为空字符串，表示清空
+
     update_chunk(
         chunk_id=chunk_id,
         edited_content=request.edited_content,
         status=request.status,
         content_tags=request.content_tags,
-        user_tag=request.user_tag,
+        user_tag=user_tag_to_update,
         last_editor_id=request.editor_id
     )
 

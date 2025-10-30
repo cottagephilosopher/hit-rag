@@ -262,10 +262,26 @@ class RAGVectorStore:
                     # 注意: Milvus 要求所有字段都必须有值，None 会导致数据不一致错误
 
                     # 合并标签：document_tags + content_tags
-                    content_tags = chunk.get('content_tags', []) or []
+                    # 标签继承逻辑：
+                    # - 文档标签（document_tags）：所有 chunk 都必须继承
+                    # - chunk 标签（content_tags）：chunk 自己的标签，可以为空
+                    # - 最终标签 = 文档标签 + chunk 标签（去重）
+                    raw_content_tags = chunk.get('content_tags')
+                    
+                    # 处理 chunk 标签（null 或 [] 都视为空）
+                    content_tags = raw_content_tags if isinstance(raw_content_tags, list) else []
+                    
+                    # 文档标签（必须继承）
                     doc_tags = document_tags or []
+                    
                     # 合并并去重（保持顺序：document_tags 在前，这样共性标签优先显示）
                     merged_tags = list(dict.fromkeys(doc_tags + content_tags))
+                    
+                    # 日志记录
+                    if not content_tags and doc_tags:
+                        logger.info(f"Chunk {chunk.get('id')} 无 chunk 标签，继承文档标签: {doc_tags}")
+                    elif content_tags:
+                        logger.info(f"Chunk {chunk.get('id')} 合并标签: 文档{doc_tags} + chunk{content_tags} = {merged_tags}")
 
                     metadata = {
                         'chunk_db_id': chunk['id'],  # 数据库主键ID（全局唯一）

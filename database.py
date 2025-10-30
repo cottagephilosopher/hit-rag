@@ -365,9 +365,11 @@ def update_chunk(
         fields.append("content_tags = ?")
         params.append(_json_dump(content_tags))
 
+    # user_tag 可以是 None（不更新）、空字符串（清空）或具体值（更新）
     if user_tag is not None:
         fields.append("user_tag = ?")
-        params.append(user_tag)
+        # 空字符串表示清空，保存为 NULL
+        params.append(user_tag if user_tag else None)
 
     if last_editor_id is not None:
         fields.append("last_editor_id = ?")
