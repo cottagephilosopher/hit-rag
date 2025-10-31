@@ -53,7 +53,7 @@ router = APIRouter()
 # 全局文档列表缓存 - 支持多种排序方式同时缓存
 # 结构: {cache_key: (data, timestamp)}
 _documents_list_cache = {}
-_cache_ttl = timedelta(minutes=5)  # 缓存 5 分钟（文档不常变化）
+_cache_ttl = timedelta(minutes=360)  # 缓存 5 分钟（文档不常变化）
 
 # 单个文档状态缓存（用于向后兼容）
 _document_cache = {}
