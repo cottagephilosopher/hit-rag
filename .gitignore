@@ -10,6 +10,7 @@ SETUP.md
 .dbs/*.db
 # Distribution / packaging
 .Python
+.env*
 build/
 develop-eggs/
 dist/
@@ -34,7 +35,8 @@ SETUP.md
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-
+files/
+.env copy
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -60,6 +62,7 @@ cover/
 
 # Django stuff:
 *.log
+logs/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

@@ -107,6 +107,32 @@ class DashScopeEmbeddings(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         """生成单个查询的 embedding"""
         try:
+            # 安全检查：验证text不超过API限制
+            # DashScope的embedding API限制为8192 tokens
+            from tokenizer.tokenizer_client import get_tokenizer
+            from config import VectorConfig
+
+            tokenizer = get_tokenizer()
+            token_count = tokenizer.count_tokens(text)
+
+            # 使用配置的限制值的75%作为安全阈值
+            # 这样可以应对不同tokenizer之间的计数差异
+            api_max_tokens = VectorConfig.EMBEDDING_MAX_TOKENS  # 8192
+            safe_max_tokens = int(api_max_tokens * 0.75)  # 6144
+
+            if token_count > safe_max_tokens:
+                logger.warning(
+                    f"⚠️ Text exceeds safe limit ({token_count} > {safe_max_tokens} [75% of {api_max_tokens}]), "
+                    f"truncating to {safe_max_tokens} tokens"
+                )
+                # 截断到safe_max_tokens
+                tokens = tokenizer.encode(text)
+                truncated_tokens = tokens[:safe_max_tokens]
+                text = tokenizer.decode(truncated_tokens)
+                logger.warning(f"   Truncated from {token_count} to {len(truncated_tokens)} tokens")
+            else:
+                logger.debug(f"✓ Text token count OK: {token_count} tokens (safe limit: {safe_max_tokens})")
+
             response = self.client.embeddings.create(
                 model=self.model,
                 input=text,
@@ -116,6 +142,7 @@ class DashScopeEmbeddings(Embeddings):
             return response.data[0].embedding
         except Exception as e:
             logger.error(f"Failed to generate DashScope embedding: {e}")
+            logger.error(f"Text length: {len(text)} chars, estimated {token_count} tokens")
             raise
 
 

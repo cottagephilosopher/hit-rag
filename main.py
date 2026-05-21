@@ -9,6 +9,7 @@ import json
 import logging
 import argparse
 from pathlib import Path
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any
 
@@ -37,8 +38,10 @@ def setup_logging(log_level: str = None, log_file: str = None):
     handlers = [logging.StreamHandler()]
 
     if log_file or LogConfig.LOG_FILE:
+        log_path = Path(log_file or LogConfig.LOG_FILE)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(
-            log_file or LogConfig.LOG_FILE,
+            log_path,
             encoding='utf-8'
         )
         handlers.append(file_handler)

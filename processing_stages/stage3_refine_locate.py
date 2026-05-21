@@ -1515,8 +1515,8 @@ class Stage3RefineLocate:
         if node.get('is_toc', False):
             is_atomic = True
             atomic_type = "toc"
-        # 优先级2: 表格超过限制
-        elif node['has_table'] and token_count > ChunkConfig.FINAL_MAX_TOKENS:
+        # 优先级2: 表格（保持语义完整性，无论大小）
+        elif node['has_table']:
             is_atomic = True
             atomic_type = "table"
         # 优先级3: 步骤序列 (保持逻辑连续性)

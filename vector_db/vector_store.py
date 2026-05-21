@@ -54,6 +54,29 @@ class RAGVectorStore:
                 drop_old=False,  # 不删除已存在的 collection
                 auto_id=False,  # 使用内容 hash 作为确定性 ID，实现自动去重
             )
+            
+            # 关键修复：直接修改 LangChain Milvus 内部的 _search_params 属性
+            # 这是 LangChain Milvus 用来存储默认搜索参数的地方
+            # 根据 Milvus 文档，ef 必须 >= k，我们设置一个足够大的默认值
+            default_ef = VectorConfig.SEARCH_EF
+            logger.info(f"Setting default search_params with ef={default_ef}")
+            
+            # 尝试多种方式设置默认的 ef 参数
+            # 方法1：设置 search_kwargs（LangChain Milvus 可能使用这个）
+            self.vector_store.search_kwargs = {"params": {"ef": default_ef}}
+            
+            # 方法2：如果有 _search_params 属性，也设置它
+            if hasattr(self.vector_store, '_search_params'):
+                self.vector_store._search_params = {"params": {"ef": default_ef}}
+            
+            # 方法3：修改底层客户端的默认参数（如果存在）
+            if hasattr(self.vector_store, 'client'):
+                # 某些版本的 Milvus客户端可能有 default_search_params 属性
+                if hasattr(self.vector_store.client, 'default_search_params'):
+                    self.vector_store.client.default_search_params = {"params": {"ef": default_ef}}
+                # 或者 _search_params
+                if hasattr(self.vector_store.client, '_search_params'):
+                    self.vector_store.client._search_params = {"params": {"ef": default_ef}}
 
             logger.info("✅ Milvus vector store initialized successfully")
 
@@ -180,20 +203,44 @@ class RAGVectorStore:
                 token_count = tokenizer.count_tokens(vectorize_text)
 
                 # 如果 token 数量超过限制，进行分段处理
-                if token_count > max_embedding_tokens:
+                # 使用配置限制的90%作为触发阈值，应对不同tokenizer的计数差异
+                split_threshold = int(max_embedding_tokens * 0.90)  # 90% 作为触发阈值
+                segment_max_tokens = int(max_embedding_tokens * 0.85)  # 85% 作为分段大小
+
+                if token_count >= split_threshold:
                     logger.warning(
                         f"⚠️  Chunk {chunk.get('id')} exceeds embedding token limit "
-                        f"({token_count} > {max_embedding_tokens}), splitting into segments..."
+                        f"({token_count} >= {split_threshold} [90% of {max_embedding_tokens}]), splitting into segments..."
                     )
 
-                    # 分段处理（保留一些重叠以保持上下文连续性）
-                    segments = self._split_text_by_tokens(
-                        vectorize_text,
-                        max_tokens=max_embedding_tokens - 100,  # 留一些余量
-                        overlap_tokens=100
-                    )
+                    try:
+                        logger.info(f"🔄 Starting split for chunk {chunk.get('id')}, segment_max_tokens={segment_max_tokens}")
 
-                    logger.info(f"✂️  Split chunk {chunk.get('id')} into {len(segments)} segments")
+                        # 分段处理（保留一些重叠以保持上下文连续性）
+                        # 使用配置限制的85%作为分段大小，应对tiktoken版本差异
+                        segments = self._split_text_by_tokens(
+                            vectorize_text,
+                            max_tokens=segment_max_tokens,  # 85% of max_embedding_tokens
+                            overlap_tokens=100
+                        )
+
+                        logger.info(f"✂️  Split chunk {chunk.get('id')} into {len(segments)} segments")
+
+                        if not segments:
+                            logger.error(f"❌ Split returned empty segments list!")
+                            raise ValueError("Split function returned empty list")
+
+                        # 验证每个segment的token数
+                        for idx, seg in enumerate(segments):
+                            seg_tokens = tokenizer.count_tokens(seg)
+                            logger.info(f"    📏 Segment {idx}: {seg_tokens} tokens")
+                            if seg_tokens > max_embedding_tokens:
+                                logger.error(f"    ❌ Segment {idx} still exceeds limit: {seg_tokens} > {max_embedding_tokens}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to split chunk {chunk.get('id')}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        raise
 
                     # 为每个分段创建向量
                     for segment_idx, segment_text in enumerate(segments):
@@ -354,6 +401,34 @@ class RAGVectorStore:
             # 构建 Milvus 过滤表达式
             expr = self._build_filter_expr(filters) if filters else None
 
+            # 计算 ef 参数：确保 ef >= k（Milvus 要求）
+            # ef 是 HNSW 索引的搜索参数，表示探索的候选节点数
+            # 如果 k 小于等于配置的默认值，使用配置值；否则使用 k 的 1.5 倍
+            default_ef = VectorConfig.SEARCH_EF
+            if k <= default_ef:
+                ef = default_ef
+            else:
+                # 当 k 大于默认值时，使用 k 的 1.5 倍以确保搜索质量
+                ef = max(k, int(k * 1.5))
+            
+            # 计算并设置 ef 参数：确保 ef >= k（Milvus 要求）
+            # 必须在调用前设置 search_kwargs，因为 LangChain Milvus 在 _collection_search 中读取它
+            search_params = {"params": {"ef": ef}}
+            self.vector_store.search_kwargs = search_params
+            
+            # 确保 search_kwargs 被正确设置（调试用）
+            if not hasattr(self.vector_store, 'search_kwargs') or self.vector_store.search_kwargs.get('params', {}).get('ef') != ef:
+                logger.warning(f"Failed to set search_kwargs, current value: {getattr(self.vector_store, 'search_kwargs', None)}")
+                # 如果设置失败，尝试直接修改底层客户端
+                if hasattr(self.vector_store, 'client'):
+                    try:
+                        # 尝试直接设置客户端的搜索参数
+                        self.vector_store.client.search_params = search_params
+                    except Exception as e:
+                        logger.warning(f"Failed to set client search_params: {e}")
+            
+            logger.info(f"Search parameters: k={k}, ef={ef}, search_kwargs={self.vector_store.search_kwargs}")
+
             # 使用 LangChain 的 similarity_search
             results = self.vector_store.similarity_search(
                 query,
@@ -361,7 +436,7 @@ class RAGVectorStore:
                 expr=expr
             )
 
-            logger.info(f"Found {len(results)} results")
+            logger.info(f"Found {len(results)} results (k={k}, ef={ef})")
             return results
 
         except Exception as e:
@@ -383,13 +458,53 @@ class RAGVectorStore:
         try:
             expr = self._build_filter_expr(filters) if filters else None
 
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k,
-                expr=expr
-            )
+            # 计算 ef 参数：确保 ef >= k（Milvus 要求）
+            # ef 是 HNSW 索引的搜索参数，表示探索的候选节点数
+            # 如果 k 小于等于配置的默认值，使用配置值；否则使用 k 的 1.5 倍
+            default_ef = VectorConfig.SEARCH_EF
+            if k <= default_ef:
+                ef = default_ef
+            else:
+                # 当 k 大于默认值时，使用 k 的 1.5 倍以确保搜索质量
+                ef = max(k, int(k * 1.5))
+            
+            # 计算并设置 ef 参数：确保 ef >= k（Milvus 要求）
+            search_params = {"params": {"ef": ef}}
+            
+            # 更新 search_kwargs
+            self.vector_store.search_kwargs = search_params
+            
+            # 尝试更新底层客户端的所有可能的属性
+            if hasattr(self.vector_store, '_search_params'):
+                self.vector_store._search_params = search_params
+            if hasattr(self.vector_store, 'client'):
+                if hasattr(self.vector_store.client, 'default_search_params'):
+                    self.vector_store.client.default_search_params = search_params
+                if hasattr(self.vector_store.client, '_search_params'):
+                    self.vector_store.client._search_params = search_params
+            
+            logger.info(f"🔍 Search with score: k={k}, ef={ef}")
+            logger.debug(f"search_kwargs={self.vector_store.search_kwargs}")
 
-            logger.info(f"Found {len(results)} results with scores")
+            # 尝试调用 similarity_search_with_score，传递 param 参数（根据 Milvus 文档）
+            try:
+                # 根据 LangChain 文档，某些版本支持 param 参数
+                results = self.vector_store.similarity_search_with_score(
+                    query,
+                    k=k,
+                    expr=expr,
+                    param=search_params  # 尝试传递 param 参数
+                )
+            except TypeError:
+                # 如果不支持 param 参数，使用默认方式
+                logger.warning("similarity_search_with_score does not accept 'param' argument, using search_kwargs")
+                results = self.vector_store.similarity_search_with_score(
+                    query,
+                    k=k,
+                    expr=expr
+                )
+
+            logger.info(f"Found {len(results)} results with scores (k={k}, ef={ef})")
             return results
 
         except Exception as e:

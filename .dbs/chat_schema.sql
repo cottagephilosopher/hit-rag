@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 CREATE INDEX IF NOT EXISTS idx_chat_sessions_session_id ON chat_sessions(session_id);
 CREATE INDEX IF NOT EXISTS idx_chat_sessions_status ON chat_sessions(status);
 
--- 聊天消息表
+-- 对话消息表
 CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
