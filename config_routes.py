@@ -5,11 +5,10 @@ RAG 配置管理 API 路由
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import database as db
-import os
 from pathlib import Path
-from config import VectorConfig
+from system_env_config import get_system_env_config, update_system_env_config
 
 router = APIRouter()
 
@@ -38,8 +37,9 @@ class BatchPromptUpdateRequest(BaseModel):
 
 class SystemConfigUpdateRequest(BaseModel):
     """系统配置更新请求"""
-    database_file: str
-    milvus_collection: str
+    database_file: Optional[str] = None
+    milvus_collection: Optional[str] = None
+    configs: Optional[Dict[str, Any]] = None
 
 
 @router.get("/api/config/rag")
@@ -357,28 +357,12 @@ async def reset_prompt_configs():
 @router.get("/api/config/system")
 async def get_system_config():
     """
-    获取系统配置
+    获取系统 .env 配置。
 
-    返回:
-        - database_file: 数据库文件路径
-        - database_exists: 数据库文件是否存在
-        - milvus_collection: Milvus 集合名称
+    返回 env.template 中声明的配置项，并按模板分组。
     """
     try:
-        # 使用统一的数据库路径获取方法
-        db_path = db.get_db_file()
-
-        # 检查数据库文件是否存在
-        database_exists = db_path.exists()
-
-        # 从配置读取 Milvus 集合名称
-        milvus_collection = VectorConfig.MILVUS_COLLECTION_NAME
-
-        return {
-            "database_file": str(db_path.absolute()),
-            "database_exists": database_exists,
-            "milvus_collection": milvus_collection
-        }
+        return get_system_env_config()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取系统配置失败: {str(e)}")
 
@@ -386,49 +370,34 @@ async def get_system_config():
 @router.put("/api/config/system")
 async def update_system_config(request: SystemConfigUpdateRequest):
     """
-    更新系统配置
-
-    参数:
-        database_file: 数据库文件路径
-        milvus_collection: Milvus 集合名称
-
-    返回:
-        更新结果
+    更新系统 .env 配置。
     """
     try:
-        from dotenv import load_dotenv, set_key, find_dotenv
+        updates = dict(request.configs or {})
+        if request.database_file is not None:
+            updates["DB_FILE"] = request.database_file
+        if request.milvus_collection is not None:
+            updates["MILVUS_COLLECTION_NAME"] = request.milvus_collection
 
-        # 查找 .env 文件
-        env_file = find_dotenv()
-        if not env_file:
-            # 如果没有 .env 文件，创建一个
-            env_file = Path.cwd() / '.env'
-            env_file.touch()
+        if not updates:
+            raise HTTPException(status_code=400, detail="没有可更新的配置项")
 
-        env_path = Path(env_file)
+        result = update_system_env_config(updates)
 
-        # 更新 .env 文件
-        set_key(env_path, "DB_FILE", request.database_file)
-        set_key(env_path, "MILVUS_COLLECTION_NAME", request.milvus_collection)
-
-        # 检查数据库文件是否存在
-        db_path = Path(request.database_file)
+        # 如果更新了数据库路径且数据库不存在，沿用旧行为自动创建
+        config = result["config"]
+        db_path = Path(config.get("database_file") or db.get_db_file())
         db_exists = db_path.exists()
-
-        # 如果数据库不存在，自动创建
         created_db = False
-        if not db_exists:
+        if "DB_FILE" in updates and not db_exists:
             try:
-                # 确保目录存在
                 db_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # 初始化数据库
                 db.init_database()
                 created_db = True
             except Exception as e:
                 print(f"警告：无法自动创建数据库: {e}")
 
-        message = "系统配置已保存到 .env 文件"
+        message = f"系统配置已保存到 .env 文件，更新 {result['updated_count']} 项"
         if created_db:
             message += "，数据库已自动创建"
         message += "。请重启服务以使配置生效。"
@@ -436,10 +405,17 @@ async def update_system_config(request: SystemConfigUpdateRequest):
         return {
             "success": True,
             "message": message,
+            "updated_count": result["updated_count"],
+            "updated_keys": result["updated_keys"],
+            "skipped_keys": result["skipped_keys"],
             "database_file": str(db_path.absolute()),
-            "milvus_collection": request.milvus_collection,
-            "database_created": created_db
+            "database_created": created_db,
+            "config": result["config"]
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新系统配置失败: {str(e)}")
 

@@ -131,6 +131,16 @@ def init_database():
 
     print(f"✅ Database initialized at: {db_file}")
 
+    try:
+        init_rag_config_from_env()
+    except Exception as e:
+        print(f"⚠️  RAG 配置初始化/补齐失败: {e}")
+
+    try:
+        init_prompt_config_from_templates()
+    except Exception as e:
+        print(f"⚠️  提示词配置初始化失败: {e}")
+
 
 # ============================================
 # Document 操作
@@ -1586,15 +1596,8 @@ def batch_update_rag_config(configs: Dict[str, float]) -> int:
 
 def init_rag_config_from_env():
     """
-    从环境变量初始化 RAG 配置（如果表为空）
+    从环境变量初始化 RAG 配置，并补齐缺失配置项
     """
-    # 检查配置表是否为空
-    with get_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) as cnt FROM rag_config").fetchone()['cnt']
-        if count > 0:
-            print("ℹ️  RAG 配置已存在，跳过初始化")
-            return
-
     # 定义默认配置（从环境变量读取）
     default_configs = [
         # 对话配置
@@ -1746,12 +1749,54 @@ def init_rag_config_from_env():
             'default_value': 5.0,
             'category': 'retrieval'
         },
+
+        # 互联网检索兜底配置
+        {
+            'config_key': 'ENABLE_WEB_SEARCH_FALLBACK',
+            'config_value': float(os.getenv('ENABLE_WEB_SEARCH_FALLBACK', 'false').lower() == 'true'),
+            'description': '知识库无法回答时是否启用互联网检索兜底',
+            'min_value': 0.0,
+            'max_value': 1.0,
+            'default_value': 0.0,
+            'category': 'web_search'
+        },
+        {
+            'config_key': 'WEB_SEARCH_MAX_RESULTS',
+            'config_value': float(os.getenv('WEB_SEARCH_MAX_RESULTS', '5')),
+            'description': '互联网检索最多使用的结果数量',
+            'min_value': 1.0,
+            'max_value': 10.0,
+            'default_value': 5.0,
+            'category': 'web_search'
+        },
+        {
+            'config_key': 'WEB_SEARCH_TIMEOUT_SECONDS',
+            'config_value': float(os.getenv('WEB_SEARCH_TIMEOUT_SECONDS', '5')),
+            'description': '互联网检索请求超时时间（秒）',
+            'min_value': 1.0,
+            'max_value': 30.0,
+            'default_value': 5.0,
+            'category': 'web_search'
+        },
     ]
+
+    with get_connection() as conn:
+        existing_rows = conn.execute("SELECT config_key FROM rag_config").fetchall()
+        existing_keys = {row['config_key'] for row in existing_rows}
+
+    configs_to_insert = [
+        config for config in default_configs
+        if config['config_key'] not in existing_keys
+    ]
+
+    if not configs_to_insert:
+        print("ℹ️  RAG 配置已存在，跳过初始化")
+        return
 
     # 批量插入配置
     with _DB_LOCK:
         with get_connection() as conn:
-            for config in default_configs:
+            for config in configs_to_insert:
                 conn.execute(
                     """
                     INSERT INTO rag_config (
@@ -1770,7 +1815,7 @@ def init_rag_config_from_env():
                     )
                 )
 
-    print(f"✅ 已初始化 {len(default_configs)} 个 RAG 配置项")
+    print(f"✅ 已初始化/补齐 {len(configs_to_insert)} 个 RAG 配置项")
 
 
 # ============================================

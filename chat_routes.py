@@ -256,7 +256,7 @@ async def send_message(request: ChatMessageRequest):
         )
 
         # 5. 构建响应
-        if result['type'] == 'answer':
+        if result['type'] in {'answer', 'answer_with_clarification', 'web_search_answer'}:
             # 正常回答
             filtered_sources = [
                 chunk for chunk in result.get('sources', [])
@@ -264,13 +264,16 @@ async def send_message(request: ChatMessageRequest):
             ]
             response_content = {
                 "type": "answer",
+                "answer_type": result['type'],
                 "content": result['response'],
                 "sources": [
                     {
                         "chunk_id": chunk.get("chunk_id"),
                         "document": chunk.get("document", ""),
                         "content": chunk.get("content", "")[:200] + "...",  # 截断显示
-                        "score": chunk.get("score", 0.0)
+                        "score": chunk.get("score", 0.0),
+                        "source_type": chunk.get("metadata", {}).get("type"),
+                        "url": chunk.get("metadata", {}).get("url")
                     }
                     for chunk in filtered_sources[:5]
                 ],

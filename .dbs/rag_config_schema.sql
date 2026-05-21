@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS rag_config (
     min_value REAL,                             -- 最小值
     max_value REAL,                             -- 最大值
     default_value REAL NOT NULL,                -- 默认值
-    category TEXT NOT NULL,                     -- 配置分类：chat | threshold | retrieval
+    category TEXT NOT NULL,                     -- 配置分类：chat | threshold | retrieval | web_search
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

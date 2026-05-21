@@ -21,6 +21,7 @@ from .dspy_signatures import (
     ResponseGeneration
 )
 from .memory_cache import ConversationMemoryCache
+from .web_search import WebSearchClient
 
 
 class DSPyRAGPipeline:
@@ -71,6 +72,8 @@ class DSPyRAGPipeline:
         self.rerank_top_n = int(os.getenv('RAG_RERANK_TOP_N', '8'))
         self.single_query_top_k = int(os.getenv('RAG_SINGLE_QUERY_TOP_K', '8'))
         self.files_display_limit = int(os.getenv('RAG_FILES_DISPLAY_LIMIT', '5'))
+        self.web_search_provider = os.getenv("WEB_SEARCH_PROVIDER", "duckduckgo").lower()
+        self.web_search_client = WebSearchClient(provider=self.web_search_provider)
 
         # 配置 DSPy LLM
         self._configure_dspy(llm_model, temperature)
@@ -96,6 +99,7 @@ class DSPyRAGPipeline:
         logger.info(f"   相关性阈值: Rerank={self.rerank_score_threshold}, L2={self.l2_distance_threshold}")
         logger.info(f"   检索数量: 单实体={self.entity_top_k}, 去重={self.multi_entity_dedup_limit}, 重排={self.rerank_top_n}")
         logger.info(f"   对话记忆缓存窗口: {memory_window}")
+        logger.info(f"   互联网检索Provider: {self.web_search_provider}")
 
     @staticmethod
     def _safe_parse_confidence(value: Any, default: float = 0.5) -> float:
@@ -171,6 +175,187 @@ class DSPyRAGPipeline:
                 "source": "conversation_manager"
             }
         }
+
+    @staticmethod
+    def _env_bool(name: str, default: str = "false") -> bool:
+        """Read a boolean environment variable."""
+        return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+    def _get_numeric_config(self, key: str, default: float) -> float:
+        """Read a numeric RAG config value from DB, falling back to environment defaults."""
+        try:
+            from database import get_rag_config
+
+            config = get_rag_config(key)
+            if config and config.get("config_value") is not None:
+                return float(config["config_value"])
+        except Exception as exc:
+            logger.debug(f"Unable to load RAG config {key} from DB: {exc}")
+
+        return default
+
+    def _load_web_search_config(self) -> Dict[str, Any]:
+        """Load web-search fallback config dynamically so UI changes take effect."""
+        enabled_default = 1.0 if self._env_bool("ENABLE_WEB_SEARCH_FALLBACK", "false") else 0.0
+        return {
+            "enabled": self._get_numeric_config("ENABLE_WEB_SEARCH_FALLBACK", enabled_default) >= 0.5,
+            "max_results": int(self._get_numeric_config(
+                "WEB_SEARCH_MAX_RESULTS",
+                float(os.getenv("WEB_SEARCH_MAX_RESULTS", "5")),
+            )),
+            "timeout": float(self._get_numeric_config(
+                "WEB_SEARCH_TIMEOUT_SECONDS",
+                float(os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "5")),
+            )),
+        }
+
+    def _web_results_to_chunks(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert web-search results into the same source shape used by RAG chunks."""
+        chunks = []
+        for index, result in enumerate(results, 1):
+            title = (result.get("title") or "互联网搜索结果").strip()
+            url = (result.get("url") or "").strip()
+            snippet = (result.get("snippet") or "").strip()
+            provider = result.get("provider") or self.web_search_provider
+
+            content_parts = [f"标题: {title}"]
+            if snippet:
+                content_parts.append(f"摘要: {snippet}")
+            if url:
+                content_parts.append(f"链接: {url}")
+
+            chunks.append({
+                "chunk_id": f"web-{index}",
+                "content": "\n".join(content_parts),
+                "score": 0.0,
+                "document": f"互联网搜索: {title}",
+                "metadata": {
+                    "type": "web_search",
+                    "source": provider,
+                    "url": url,
+                    "title": title,
+                },
+            })
+        return chunks
+
+    def _answer_with_web_search(
+        self,
+        user_query: str,
+        search_query: str,
+        conversation_history: str = "",
+        reason: str = "no_results",
+    ) -> Optional[Dict[str, Any]]:
+        """Use internet search as a fallback answer source when knowledge-base retrieval fails."""
+        config = self._load_web_search_config()
+        if not config["enabled"]:
+            logger.info("  🌐 Web search fallback is disabled")
+            return None
+
+        query = (search_query or user_query or "").strip()
+        if not query:
+            return None
+
+        logger.info(f"  🌐 Running web search fallback ({reason}) with query: {query[:100]}...")
+        results = self.web_search_client.search(
+            query=query,
+            max_results=config["max_results"],
+            timeout=config["timeout"],
+        )
+        if not results:
+            logger.info("  🌐 Web search fallback returned no results")
+            return None
+
+        web_chunks = self._web_results_to_chunks(results)
+        intent_note = (
+            "知识库检索未能提供足够依据，以下资料来自互联网搜索结果。"
+            "回答时请明确基于互联网来源，并提醒用户核验。"
+        )
+        response_result = self.generate_response(
+            user_query=user_query,
+            retrieved_chunks=web_chunks,
+            conversation_history=conversation_history,
+            clarification_hint="",
+            intent_note=intent_note,
+        )
+
+        response_text = (
+            f"{response_result['response']}\n\n---\n"
+            "⚠️ **提示**：知识库未找到足够依据，以上内容来自互联网搜索结果，请注意核验。"
+        )
+
+        return {
+            "type": "web_search_answer",
+            "response": response_text,
+            "confidence": response_result.get("confidence", 0.0),
+            "sources": web_chunks,
+            "source_ids": response_result.get("source_ids", [c["chunk_id"] for c in web_chunks]),
+            "web_search": {
+                "provider": self.web_search_provider,
+                "query": query,
+                "reason": reason,
+            },
+        }
+
+    def _build_file_source_payload(self, chunk: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Build a stream file/source payload for local chunks and web-search chunks."""
+        metadata = chunk.get("metadata", {}) or {}
+        metadata_type = metadata.get("type")
+        if metadata_type in {"conversation_history", "conversation_memory"}:
+            return None
+
+        if metadata_type == "web_search":
+            title = metadata.get("title") or chunk.get("document", "互联网搜索结果")
+            url = metadata.get("url") or ""
+            if not url:
+                return None
+            return {
+                "fileName": title,
+                "filePath": url,
+                "chunkDbId": chunk.get("chunk_id", ""),
+                "sourceFile": title,
+                "sourceType": "web_search",
+            }
+
+        import os
+        from urllib.parse import quote
+
+        api_base_url = os.getenv("API_BASE_URL", "http://localhost:8086")
+        doc_name = chunk.get("document", "Unknown")
+        chunk_db_id = chunk.get("chunk_db_id", "")
+
+        if chunk_db_id and doc_name and doc_name != "Unknown":
+            encoded_doc_name = quote(doc_name)
+            file_path = f"{api_base_url}/api/view/document/{encoded_doc_name}/chunk/{chunk_db_id}"
+        else:
+            file_path = metadata.get("file_path", "") or f"#chunk-{chunk_db_id}"
+
+        if not doc_name:
+            return None
+
+        return {
+            "fileName": doc_name,
+            "filePath": file_path,
+            "chunkDbId": chunk_db_id,
+            "sourceFile": doc_name,
+        }
+
+    def _build_web_search_stream_events(self, web_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Build SSE chunks for a completed web-search fallback answer."""
+        events = [
+            {
+                "type": "reasoning",
+                "content": f"✓ 互联网检索完成\n  • 找到 {len(web_result.get('sources', []))} 条结果",
+            },
+            {"type": "content", "content": web_result["response"]},
+        ]
+
+        for chunk in web_result.get("sources", [])[:self.files_display_limit]:
+            payload = self._build_file_source_payload(chunk)
+            if payload:
+                events.append({"type": "files", "content": payload})
+
+        events.append({"type": "done"})
+        return events
 
     def _configure_dspy(self, model: str, temperature: float):
         """配置 DSPy 的 LLM"""
@@ -996,6 +1181,16 @@ class DSPyRAGPipeline:
                     chunks = [history_chunk]
                     memory_fallback = True
                 else:
+                    web_result = self._answer_with_web_search(
+                        user_query=user_query,
+                        search_query=optimized_query,
+                        conversation_history=conversation_history,
+                        reason="no_results"
+                    )
+                    if web_result:
+                        self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                        return web_result
+
                     return {
                         "type": "no_results",
                         "response": "抱歉，我没有找到相关的文档内容。您可以换个方式提问吗？",
@@ -1037,6 +1232,16 @@ class DSPyRAGPipeline:
                         has_rerank = False
                     else:
                         logger.info(f"  {score_type} score indicates no relevant results: {best_score:.3f}")
+                        web_result = self._answer_with_web_search(
+                            user_query=user_query,
+                            search_query=optimized_query,
+                            conversation_history=conversation_history,
+                            reason="low_relevance"
+                        )
+                        if web_result:
+                            self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                            return web_result
+
                         return {
                             "type": "no_results",
                             "response": "抱歉，我的知识库中没有找到相关的文档内容。我只能回答与已有文档相关的问题。",
@@ -1083,6 +1288,16 @@ class DSPyRAGPipeline:
         # 只有业务相关性低且检索极差时才说超出范围
         if business_relevance == 'low' and not retrieval_is_good:
             logger.info(f"  Query has low business relevance and very poor retrieval, out of scope")
+            web_result = self._answer_with_web_search(
+                user_query=user_query,
+                search_query=optimized_query,
+                conversation_history=conversation_history,
+                reason="out_of_scope"
+            )
+            if web_result:
+                self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                return web_result
+
             return {
                 "type": "out_of_scope",
                 "response": "抱歉，这个问题似乎超出了我的知识范围。我主要帮助解答产品手册、安装文档、说明书等相关问题。您可以换个产品相关的问题试试？",
@@ -1109,6 +1324,20 @@ class DSPyRAGPipeline:
         # 情况3：其他情况直接回答
         else:
             logger.info(f"  Retrieval quality: {'excellent' if retrieval_is_excellent else 'good'}, direct answer")
+
+        if retrieval_is_good and (
+            not eval_result['is_sufficient']
+            or eval_result.get('confidence', 0.0) < self.confidence_threshold
+        ):
+            web_result = self._answer_with_web_search(
+                user_query=user_query,
+                search_query=optimized_query,
+                conversation_history=conversation_history,
+                reason="insufficient_context"
+            )
+            if web_result:
+                self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                return web_result
 
         # 7. 生成回复（带或不带澄清提示）
         generation_chunks = chunks
@@ -1360,6 +1589,23 @@ class DSPyRAGPipeline:
             yield {"type": "reasoning", "content": no_results_msg}
             await asyncio.sleep(0)
 
+            yield {"type": "reasoning", "content": "🌐 知识库未命中，检查是否可以使用互联网检索..."}
+            await asyncio.sleep(0)
+            web_result = await loop.run_in_executor(
+                None,
+                self._answer_with_web_search,
+                user_query,
+                optimized_query,
+                conversation_history,
+                "no_results"
+            )
+            if web_result:
+                self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                for event in self._build_web_search_stream_events(web_result):
+                    yield event
+                    await asyncio.sleep(0)
+                return
+
             yield {
                 "type": "content",
                 "content": "抱歉，我没有找到相关的文档内容。\n\n建议：\n- 尝试使用其他关键词\n- 简化或具体化您的问题\n- 确认问题是否属于文档涵盖的范围"
@@ -1432,6 +1678,23 @@ class DSPyRAGPipeline:
                         yield {"type": "reasoning", "content": low_relevance_msg}
                         await asyncio.sleep(0)
 
+                        yield {"type": "reasoning", "content": "🌐 知识库相关度不足，检查是否可以使用互联网检索..."}
+                        await asyncio.sleep(0)
+                        web_result = await loop.run_in_executor(
+                            None,
+                            self._answer_with_web_search,
+                            user_query,
+                            optimized_query,
+                            conversation_history,
+                            "low_relevance"
+                        )
+                        if web_result:
+                            self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                            for event in self._build_web_search_stream_events(web_result):
+                                yield event
+                                await asyncio.sleep(0)
+                            return
+
                         # 发送最终回复
                         yield {
                             "type": "content",
@@ -1487,6 +1750,23 @@ class DSPyRAGPipeline:
         business_relevance = intent_result.get('business_relevance', 'medium')
 
         if business_relevance == 'low' and not retrieval_is_good:
+            yield {"type": "reasoning", "content": "🌐 问题不在知识库范围内，检查是否可以使用互联网检索..."}
+            await asyncio.sleep(0)
+            web_result = await loop.run_in_executor(
+                None,
+                self._answer_with_web_search,
+                user_query,
+                optimized_query,
+                conversation_history,
+                "out_of_scope"
+            )
+            if web_result:
+                self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                for event in self._build_web_search_stream_events(web_result):
+                    yield event
+                    await asyncio.sleep(0)
+                return
+
             yield {
                 "type": "content",
                 "content": "抱歉，这个问题似乎超出了我的知识范围。我主要帮助解答产品手册、安装文档、说明书等相关问题。您可以换个产品相关的问题试试？"
@@ -1506,6 +1786,27 @@ class DSPyRAGPipeline:
         elif retrieval_is_good and not eval_result['is_sufficient'] and eval_result.get('clarification_hint'):
             clarification_hint = eval_result['clarification_hint']
             response_type = "answer_with_clarification"
+
+        if retrieval_is_good and (
+            not eval_result['is_sufficient']
+            or eval_result.get('confidence', 0.0) < self.confidence_threshold
+        ):
+            yield {"type": "reasoning", "content": "🌐 知识库依据不充分，检查是否可以使用互联网检索补充..."}
+            await asyncio.sleep(0)
+            web_result = await loop.run_in_executor(
+                None,
+                self._answer_with_web_search,
+                user_query,
+                optimized_query,
+                conversation_history,
+                "insufficient_context"
+            )
+            if web_result:
+                self.memory_cache.add_exchange(session_id, user_query, web_result['response'])
+                for event in self._build_web_search_stream_events(web_result):
+                    yield event
+                    await asyncio.sleep(0)
+                return
 
         # 步骤6: 生成最终回复
         yield {"type": "reasoning", "content": "💡 正在生成回复..."}
@@ -1535,35 +1836,8 @@ class DSPyRAGPipeline:
 
         # 发送文件源信息
         if not memory_fallback:
-            # 从环境变量获取 API 基础 URL
-            import os
-            from urllib.parse import quote
-            api_base_url = os.getenv("API_BASE_URL", "http://localhost:8086")
-
             for chunk in generation_chunks[:self.files_display_limit]:
-                metadata_type = chunk.get('metadata', {}).get('type')
-                if metadata_type in {"conversation_history", "conversation_memory"}:
-                    continue
-                doc_name = chunk.get('document', 'Unknown')
-                chunk_db_id = chunk.get('chunk_db_id', '')  # 使用数据库主键ID
-
-                # 构造完整的 API 导航 URL
-                if chunk_db_id and doc_name and doc_name != 'Unknown':
-                    # URL 编码文档名以处理特殊字符
-                    encoded_doc_name = quote(doc_name)
-                    file_path = f"{api_base_url}/api/view/document/{encoded_doc_name}/chunk/{chunk_db_id}"
-                else:
-                    # 降级：使用传统格式
-                    file_path = chunk.get('metadata', {}).get('file_path', '') or f"#chunk-{chunk_db_id}"
-
-                if doc_name:
-                    yield {
-                        "type": "files",
-                        "content": {
-                            "fileName": doc_name,
-                            "filePath": file_path,
-                            "chunkDbId": chunk_db_id,  # 传递数据库主键ID
-                            "sourceFile": doc_name  # 传递源文件名
-                        }
-                    }
+                payload = self._build_file_source_payload(chunk)
+                if payload:
+                    yield {"type": "files", "content": payload}
                     await asyncio.sleep(0)
